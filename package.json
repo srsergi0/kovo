@@ -1,0 +1,43 @@
+{
+  "name": "kovo",
+  "version": "0.1.0",
+  "description": "Compile React-style TSX into native Xiaomi Vela QuickApp .ux files — zero runtime overhead",
+  "main": "scripts/babel-plugin-vela-ux.js",
+  "files": [
+    "scripts/",
+    "types/",
+    "babel.config.js"
+  ],
+  "keywords": [
+    "xiaomi",
+    "vela",
+    "smartwatch",
+    "jsx",
+    "tsx",
+    "react",
+    "quickapp",
+    "wearable",
+    "babel-plugin"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test scripts/babel-plugin-vela-ux.test.js",
+    "dev": "node scripts/dev.js",
+    "dev:emulator": "node scripts/dev-emulator.js",
+    "build:copy": "node scripts/copy-static.js",
+    "build:jsx": "node scripts/build-jsx.js",
+    "build": "bun run build:copy && bun run build:jsx",
+    "aiot:build": "bun run build && aiot build --enable-custom-component",
+    "preview": "node scripts/preview.js",
+    "clean": "node -e \"require('fs').rmSync('src',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "@aiot-toolkit/velasim": "^0.1.26",
+    "@babel/core": "^7.24.0",
+    "@babel/preset-env": "^7.24.0",
+    "@babel/preset-react": "^7.24.0",
+    "@babel/preset-typescript": "^7.24.0",
+    "aiot-toolkit": "^2.0.5",
+    "typescript": "^5.4.0"
+  }
+}

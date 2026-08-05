@@ -1,0 +1,9 @@
+node_modules/
+src/
+build/
+dist/
+*.log
+*.rpk
+.DS_Store
+bun.lock
+package-lock.json

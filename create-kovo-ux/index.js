@@ -105,7 +105,7 @@ const pkg = {
     'dev:emulator': 'node scripts/dev-emulator.js',
     'build:copy': 'node scripts/copy-static.js',
     'build:jsx': 'node scripts/build-jsx.js',
-    build: 'bun run build:copy && bun run build:jsx',
+    build: 'bun run clean && bun run build:copy && bun run build:jsx',
     'aiot:build': 'bun run build && aiot build --enable-custom-component',
     clean: "node -e \"require('fs').rmSync('src',{recursive:true,force:true})\"",
   },

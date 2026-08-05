@@ -95,7 +95,7 @@ System modules MUST be declared under `"features"` inside `src-tsx/manifest.json
 #### Full Example (`pages/network/network.tsx`)
 
 ```tsx
-import { useState } from 'kovo';
+import { useState } from 'kovo-ux';
 import fetch from '@system.fetch';
 import vibrator from '@system.vibrator';
 

@@ -997,7 +997,7 @@ function buildUxContent(source, filename) {
   traverse(ast, {
     ImportDeclaration(path) {
       const src = path.node.source.value;
-      if (src === 'kovo' || src === 'vela-jsx' || src === 'react') {
+      if (src === 'kovo-ux' || src === 'kovo' || src === 'vela-jsx' || src === 'react') {
         return;
       }
       const isRelativeOrComp = /^(\.|\.\.\/)/.test(src) || /\.(ux|tsx?)$/.test(src);

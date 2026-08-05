@@ -1,4 +1,4 @@
-import { useState } from 'kovo';
+import { useState } from 'kovo-ux';
 import router from '@system.router';
 import vibrator from '@system.vibrator';
 

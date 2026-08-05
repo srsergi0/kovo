@@ -99,7 +99,7 @@ In accordance with official Xiaomi Vela OS specifications, multiple components c
 
 #### Input TSX:
 ```tsx
-import { useState } from 'kovo';
+import { useState } from 'kovo-ux';
 import Part1 from './part1';
 import Part2 from './part2';
 
@@ -161,7 +161,7 @@ In Kovo, `useRef()` maps directly to QuickApp's native `$element("refId")` selec
 
 #### Input TSX:
 ```tsx
-import { useRef } from 'kovo';
+import { useRef } from 'kovo-ux';
 
 export default function ScrollDemo() {
   const listRef = useRef(null);

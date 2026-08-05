@@ -59,7 +59,7 @@ const { transformVelaUx } = require('./babel-plugin-vela-ux');
 
 test('my new feature works correctly', () => {
   const input = `
-    import { useState } from 'kovo';
+    import { useState } from 'kovo-ux';
 
     export const style = \`
       .page { width: 466px; height: 466px; }

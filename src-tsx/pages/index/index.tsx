@@ -1,4 +1,4 @@
-import { useState } from 'kovo';
+import { useState } from 'kovo-ux';
 import vibrator from '@system.vibrator';
 import router from '@system.router';
 import StatCard from '../../components/StatCard/StatCard';

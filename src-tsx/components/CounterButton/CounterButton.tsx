@@ -1,4 +1,4 @@
-import { useState } from 'kovo';
+import { useState } from 'kovo-ux';
 
 export interface CounterButtonProps {
   value?: number;

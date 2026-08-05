@@ -71,7 +71,7 @@ The `useRef` hook allows direct access to native smartwatch DOM elements (such a
 
 ##### Input TSX:
 ```tsx
-import { useRef } from 'kovo';
+import { useRef } from 'kovo-ux';
 
 export default function InputFocusPage() {
   const nameInputRef = useRef(null);
@@ -117,7 +117,7 @@ Custom hooks enable reusable UI logic across multiple pages and components.
 
 ```tsx
 // src-tsx/hooks/useSteps.ts
-import { useState } from 'kovo';
+import { useState } from 'kovo-ux';
 
 export function useSteps(initialSteps = 8450) {
   const [steps, setSteps] = useState(initialSteps);

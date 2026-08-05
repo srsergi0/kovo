@@ -11,11 +11,11 @@ Kovo is a compile-time engine that transforms standard React functional componen
 Scaffold a new project instantly:
 
 ```bash
-npx create-kovo
+npx create-kovo-ux
 ```
 
 ```text
-      ⌚  create-kovo v0.1.0
+      ⌚  create-kovo-ux v0.1.0
 
   ◆  What is your project name?
   │  my-watch-app
@@ -76,7 +76,7 @@ bun test                 # Run 168+ compiler tests
 ## 📖 Write Your First Page
 
 ```tsx
-import { useState } from 'kovo';
+import { useState } from 'kovo-ux';
 import vibrator from '@system.vibrator';
 
 export const style = `

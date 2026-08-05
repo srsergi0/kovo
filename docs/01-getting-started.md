@@ -88,7 +88,7 @@ The 466x466 OLED smartwatch emulator window will appear instantly on your screen
 Create a new file `src-tsx/pages/hello/hello.tsx`:
 
 ```tsx
-import { useState } from 'kovo';
+import { useState } from 'kovo-ux';
 import router from '@system.router';
 import vibrator from '@system.vibrator';
 

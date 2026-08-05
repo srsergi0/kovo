@@ -1,5 +1,5 @@
 {
-  "name": "kovo",
+  "name": "kovo-ux",
   "version": "0.1.0",
   "description": "Compile React-style TSX into native Xiaomi Vela QuickApp .ux files — zero runtime overhead",
   "main": "scripts/babel-plugin-vela-ux.js",
@@ -20,6 +20,14 @@
     "babel-plugin"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/srsergi0/kovo.git"
+  },
+  "homepage": "https://github.com/srsergi0/kovo#readme",
+  "bugs": {
+    "url": "https://github.com/srsergi0/kovo/issues"
+  },
   "scripts": {
     "test": "node --test scripts/babel-plugin-vela-ux.test.js",
     "dev": "node scripts/dev.js",

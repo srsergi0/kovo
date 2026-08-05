@@ -1715,7 +1715,7 @@ describe('CRUEL: import edge cases', () => {
 describe('React Functional Components', () => {
   test('functional component with useState, props destructuring, and handlers', () => {
     const src = `
-      import { useState } from 'kovo';
+      import { useState } from 'kovo-ux';
       export default function Counter({ value = 0, label = 'Count' }) {
         const [count, setCount] = useState(value);
         function handleInc() {
@@ -1739,7 +1739,7 @@ describe('React Functional Components', () => {
 
   test('custom hook inlining (useCounter)', () => {
     const src = `
-      import { useState } from 'kovo';
+      import { useState } from 'kovo-ux';
 
       function useCounter(initialValue = 0) {
         const [count, setCount] = useState(initialValue);
@@ -1780,7 +1780,7 @@ describe('React Functional Components', () => {
 
   test('ultra robust useRef support: DOM element references, methods, and custom hooks', () => {
     const src = `
-      import { useState, useRef } from 'kovo';
+      import { useState, useRef } from 'kovo-ux';
 
       function useScrollToTop() {
         const listRef = useRef(null);
@@ -1841,7 +1841,7 @@ describe('React Functional Components', () => {
 
   test('dynamic component tag <component is={activeTab} /> is serialized to is="{{activeTab}}"', () => {
     const src = `
-      import { useState } from 'kovo';
+      import { useState } from 'kovo-ux';
       import Part1 from './part1';
       import Part2 from './part2';
 
@@ -1860,7 +1860,7 @@ describe('React Functional Components', () => {
 
   test('Vela OS compliance: methods MUST be emitted directly on export default, NOT inside a methods: {} wrapper', () => {
     const src = `
-      import { useState } from 'kovo';
+      import { useState } from 'kovo-ux';
 
       export default function VelaApp() {
         const [counter, setCounter] = useState(100);

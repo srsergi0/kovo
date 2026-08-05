@@ -11,8 +11,8 @@ A complete quick-reference guide for all Kovo APIs, compiler behaviors, supporte
 These imports are consumed by the Kovo compiler and stripped from the final output:
 
 ```tsx
-import { useState } from 'kovo';    // State declaration hook
-import { useRef } from 'kovo';      // DOM element reference hook
+import { useState } from 'kovo-ux';    // State declaration hook
+import { useRef } from 'kovo-ux';      // DOM element reference hook
 ```
 
 ### System Module Imports

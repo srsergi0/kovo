@@ -199,7 +199,7 @@ type MenuProps = CommonProps & VelaDirectives & {
 };
 
 // React Hooks module
-declare module 'kovo' {
+declare module 'kovo-ux' {
   export function useState<T>(initialState: T | (() => T)): [T, (newState: T | ((prev: T) => T)) => void];
   export function useEffect(effect: () => void | (() => void), deps?: any[]): void;
   export function useRef<T>(initialValue?: T): { current: T };

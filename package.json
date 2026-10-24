@@ -6,7 +6,10 @@
   "files": [
     "scripts/",
     "types/",
-    "babel.config.js"
+    "babel.config.js",
+    "docs/",
+    "AGENTS.md",
+    "llms.txt"
   ],
   "keywords": [
     "xiaomi",

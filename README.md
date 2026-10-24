@@ -115,6 +115,16 @@ This compiles to a native `.ux` file with `protected: { count: 0 }` (page state)
 
 ---
 
+## 🤖 Using an AI coding agent
+
+Every project created with `create-kovo-ux` includes an **`AGENTS.md`** (read by Claude Code, Codex, Cursor, Copilot and others) plus a `CLAUDE.md` that imports it. It gives the agent everything it needs to write code that runs on the watch: the supported React subset, what is not supported and the alternative, JSX/CSS rules, `@system.*` APIs with their manifest features, the memory/performance rules, a compiler-message → fix table and the verification loop (`bun run build` without `[kovo]` warnings, `bun run aiot:build` without `🟠` lines).
+
+- App guide: [`docs/ai/app-guide.md`](./docs/ai/app-guide.md) (same file as the scaffolded `AGENTS.md`)
+- Contributing to Kovo itself: [`AGENTS.md`](./AGENTS.md)
+- LLM docs index: [`llms.txt`](./llms.txt)
+
+---
+
 ## 📚 Documentation
 
 See the full documentation in [`docs/`](./docs/README.md):
@@ -128,6 +138,7 @@ See the full documentation in [`docs/`](./docs/README.md):
 - [Testing & CLI Tools](./docs/07-testing-and-cli-tools.md)
 - [API Reference & Cheatsheet](./docs/08-api-reference-and-cheatsheet.md)
 - [React → Vela Mapping & Limits](./docs/09-react-to-vela-mapping.md)
+- [AI Agent App Guide](./docs/ai/app-guide.md)
 
 ---
 

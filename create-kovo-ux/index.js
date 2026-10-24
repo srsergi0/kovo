@@ -158,8 +158,11 @@ p.note(
     `cd ${relativeDir}`,
     installDeps ? '' : 'bun install',
     'bun run dev:emulator',
+    '',
+    'Using an AI coding agent? AGENTS.md (and CLAUDE.md) in the',
+    'project tell it everything Kovo and the watch support.',
   ]
-    .filter(Boolean)
+    .filter((line, i) => line || i > 2)
     .join('\n'),
   'Next steps'
 );

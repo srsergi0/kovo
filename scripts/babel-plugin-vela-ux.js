@@ -109,6 +109,12 @@ function createContext(filename, options) {
     templateImports: [],
     usedComponents: new Set(),
     inlineCache: new Map(),
+    moduleCache: new Map(),
+    inlinedHookImports: new Set(),
+    importedDeps: new Set(),
+    extraBindings: new Map(),
+    extraImports: [],
+    extraHelpers: [],
     inlineStyles: [],
     inlinedComponents: new Set(),
     moduleBindings: new Map(),
@@ -401,6 +407,58 @@ function collectPropTypes(ast, fnNode) {
     if (name && type) result.set(name, type);
   }
   return result;
+}
+
+// -----------------------------------------------------------------------------
+// Glyph check: the watch system font is a CJK font without emoji. Verified on
+// the Vela emulator: emoji, Hangul and ↻ ♡ ♪ ♫ ✗ render as empty boxes, while
+// arrows (← → ↑ ↓ ⇄), shapes (● ○ ■ □ ▲ ▼ ◆ ★ ☆), ✓ ✕ and Latin/CJK punctuation work.
+// -----------------------------------------------------------------------------
+
+const MISSING_GLYPH_RE = /[\p{Extended_Pictographic}\p{Script=Hangul}↻♡♪♫✗]/gu;
+// Pictographic in Unicode but present in the font (verified).
+const FONT_HAS_GLYPH = new Set(['★']);
+
+// Replacements limited to glyphs verified on the emulator.
+const GLYPH_SUGGESTIONS = {
+  '✔': '✓', '✅': '✓', '☑': '✓',
+  '✖': '✕', '❌': '✕', '❎': '✕', '✗': '✕',
+  '⭐': '★', '🌟': '★',
+  '🔴': '●', '🟢': '●', '🔵': '●', '⚫': '●', '⚪': '○',
+  '➡': '→', '⬅': '←', '⬆': '↑', '⬇': '↓',
+  '🔄': '⇄', '🔁': '⇄', '↻': '⇄',
+};
+
+function checkGlyphs(ast, ctx) {
+  if (ctx.options.checkGlyphs === false) return;
+  const found = new Set();
+  const scan = (text) => {
+    for (const ch of String(text).match(MISSING_GLYPH_RE) || []) if (!FONT_HAS_GLYPH.has(ch)) found.add(ch);
+  };
+  traverse(ast, {
+    CallExpression(p) {
+      // Log output never reaches the screen.
+      const c = p.node.callee;
+      if (t.isMemberExpression(c) && t.isIdentifier(c.object, { name: 'console' })) p.skip();
+    },
+    StringLiteral(p) {
+      if (!p.parentPath.isImportDeclaration() && !p.parentPath.isExportDeclaration()) scan(p.node.value);
+    },
+    TemplateElement(p) {
+      scan(p.node.value.cooked);
+    },
+    JSXText(p) {
+      scan(p.node.value);
+    },
+  });
+  if (!found.size) return;
+  const chars = [...found];
+  const tips = chars.filter((c) => GLYPH_SUGGESTIONS[c]).map((c) => `${c} → ${GLYPH_SUGGESTIONS[c]}`);
+  ctx.warn(
+    `Text uses characters the watch font cannot draw (they render as empty boxes): ${chars.join(' ')}. ` +
+    (tips.length ? `Try ${tips.join(', ')}; ` : '') +
+    'use a PNG <image> for icons.',
+  );
 }
 
 // -----------------------------------------------------------------------------
@@ -1417,6 +1475,134 @@ function findHookInAst(ast, name) {
   return null;
 }
 
+function resolveModuleFile(src, fromFile) {
+  if (!fromFile || !path.isAbsolute(fromFile)) return null;
+  const base = path.resolve(path.dirname(fromFile), src);
+  const candidates = [base, ...['.ts', '.tsx', '.js', '.jsx'].map((e) => base + e),
+    ...['index.ts', 'index.tsx', 'index.js'].map((f) => path.join(base, f))];
+  return candidates.find((c) => /\.(t|j)sx?$/.test(c) && fs.existsSync(c) && fs.statSync(c).isFile()) || null;
+}
+
+function loadModule(file, ctx, root) {
+  if (ctx.moduleCache.has(file)) return ctx.moduleCache.get(file);
+  const ast = parser.parse(fs.readFileSync(file, 'utf8'), {
+    sourceType: 'module',
+    plugins: /\.ts$/.test(file) ? ['typescript'] : ['jsx', 'typescript'],
+  });
+  stripTypes(ast);
+  const mod = { ast, file, root };
+  ctx.moduleCache.set(file, mod);
+  return mod;
+}
+
+/** Top-level binding of `name` in a module: an import specifier or a declaration. */
+function topLevelBinding(ast, name) {
+  for (let stmt of ast.program.body) {
+    if (t.isImportDeclaration(stmt)) {
+      const spec = stmt.specifiers.find((s) => s.local.name === name);
+      if (spec) return { kind: 'import', decl: stmt, spec };
+      continue;
+    }
+    if ((t.isExportNamedDeclaration(stmt) || t.isExportDefaultDeclaration(stmt)) && stmt.declaration) stmt = stmt.declaration;
+    if ((t.isFunctionDeclaration(stmt) || t.isClassDeclaration(stmt)) && stmt.id && stmt.id.name === name) {
+      return { kind: 'decl', node: stmt };
+    }
+    if (t.isVariableDeclaration(stmt)) {
+      const d = stmt.declarations.find((x) => t.isIdentifier(x.id, { name }));
+      if (d) return { kind: 'decl', node: t.variableDeclaration(stmt.kind, [d]) };
+    }
+  }
+  return null;
+}
+
+/** Finds hook `name` in the module or, through a relative import, in another module. */
+function resolveHook(name, mod, ctx) {
+  const local = findHookInAst(mod.ast, name);
+  if (local) return { fn: local, mod };
+  const binding = topLevelBinding(mod.ast, name);
+  if (!binding || binding.kind !== 'import') return null;
+  const src = binding.decl.source.value;
+  if (!/^\.\.?\//.test(src)) return { error: `it is imported from "${src}"; only relative imports can be inlined` };
+  const file = resolveModuleFile(src, mod.file);
+  if (!file) return { error: `"${src}" could not be resolved` };
+  const hookMod = loadModule(file, ctx, mod.root);
+  let exported = null;
+  if (t.isImportDefaultSpecifier(binding.spec)) exported = 'default';
+  else if (t.isImportSpecifier(binding.spec)) exported = propKeyName(binding.spec.imported);
+  let localName = exported;
+  for (const stmt of hookMod.ast.program.body) {
+    if (exported === 'default' && t.isExportDefaultDeclaration(stmt)) {
+      const d = stmt.declaration;
+      if (t.isIdentifier(d)) localName = d.name;
+      else if (isFunctionNode(d) || t.isFunctionDeclaration(d)) {
+        if (mod === mod.root) ctx.inlinedHookImports.add(name);
+        return { fn: d, mod: hookMod };
+      }
+    }
+    if (t.isExportNamedDeclaration(stmt) && !stmt.declaration) {
+      const spec = stmt.specifiers.find((x) => propKeyName(x.exported) === exported);
+      if (spec) localName = spec.local.name;
+    }
+  }
+  const fn = findHookInAst(hookMod.ast, localName);
+  if (!fn) return { error: `"${src}" has no exported hook "${exported}"` };
+  if (mod === mod.root) ctx.inlinedHookImports.add(name);
+  return { fn, mod: hookMod };
+}
+
+/** Names read under `nodePath` that resolve to top-level bindings of `mod` (hooks excluded). */
+function freeModuleNames(nodePath, mod) {
+  const names = new Set();
+  nodePath.traverse({
+    Identifier(p) {
+      if (!p.isReferencedIdentifier()) return;
+      const n = p.node.name;
+      if (p.scope.hasBinding(n, true) || /^use[A-Z]/.test(n)) return;
+      if (topLevelBinding(mod.ast, n)) names.add(n);
+    },
+  });
+  return names;
+}
+
+/** Copies an imported hook's module-level dependency into the compiled file. */
+function importModuleDependency(name, mod, ctx) {
+  const key = `${mod.file}#${name}`;
+  if (ctx.importedDeps.has(key)) return;
+  ctx.importedDeps.add(key);
+  const binding = topLevelBinding(mod.ast, name);
+  if (!binding) return;
+
+  if (ctx.moduleBindings.has(name) || ctx.extraBindings.has(name)) {
+    const mine = topLevelBinding(mod.root.ast, name);
+    const same = mine && mine.kind === 'import' && binding.kind === 'import' &&
+      mine.decl.source.value === binding.decl.source.value;
+    if (!same) {
+      ctx.warn(`"${name}" from ${path.basename(mod.file)} clashes with another "${name}" in ${path.basename(ctx.filename)}; rename one of them.`);
+    }
+    return;
+  }
+  ctx.extraBindings.set(name, key);
+
+  if (binding.kind === 'import') {
+    let src = binding.decl.source.value;
+    if (KOVO_MODULES.has(src)) return;
+    if (/^\.\.?\//.test(src) && ctx.filename && path.isAbsolute(ctx.filename)) {
+      src = path.relative(path.dirname(ctx.filename), path.resolve(path.dirname(mod.file), src)).replace(/\\/g, '/');
+      if (!src.startsWith('.')) src = `./${src}`;
+    }
+    ctx.extraImports.push(generator(t.importDeclaration([t.cloneNode(binding.spec)], t.stringLiteral(src)), { jsescOption: { quotes: 'single' } }).code);
+    return;
+  }
+  const node = t.cloneNode(binding.node, true);
+  traverse(t.file(t.program([node])), {
+    Program(p) {
+      for (const dep of freeModuleNames(p, mod)) if (dep !== name) importModuleDependency(dep, mod, ctx);
+      p.stop();
+    },
+  });
+  ctx.extraHelpers.push(generator(node).code);
+}
+
 /** Normalizes the props parameter: `({ a = 1 })` or `(props)` + `props.a`. */
 function collectProps(fnPath, model, ctx, propTypes) {
   const p0Path = fnPath.get('params.0');
@@ -1471,12 +1657,14 @@ function collectProps(fnPath, model, ctx, propTypes) {
  * Inline a custom hook: clone it, substitute parameters with call arguments
  * and rename returned bindings to the names the caller destructures.
  */
-function inlineHook(name, call, pattern, model, ctx, ast, depth) {
-  const hook = findHookInAst(ast, name);
-  if (!hook) {
-    ctx.warn(`Custom hook ${name}() is not defined in this file; only same-file hooks are inlined.`);
+function inlineHook(name, call, pattern, model, ctx, mod, depth) {
+  const resolved = resolveHook(name, mod, ctx);
+  if (!resolved || resolved.error) {
+    ctx.warn(`Custom hook ${name}() could not be inlined: ${resolved ? resolved.error : 'it is not defined or imported in this file'}.`);
     return;
   }
+  const hook = resolved.fn;
+  const hookMod = resolved.mod;
   if (depth > 10) throw new Error(`Custom hook ${name}() recursion is too deep.`);
 
   const clone = t.cloneNode(hook, true);
@@ -1493,6 +1681,12 @@ function inlineHook(name, call, pattern, model, ctx, ast, depth) {
       p.stop();
     },
   });
+
+  // Hooks from other modules bring their module-level dependencies along.
+  // Collected before parameter substitution so caller expressions are not mistaken for them.
+  if (hookMod !== mod.root) {
+    for (const dep of freeModuleNames(fnPath, hookMod)) importModuleDependency(dep, hookMod, ctx);
+  }
 
   const args = (call && call.arguments) || [];
   fnPath.node.params.forEach((param, i) => {
@@ -1547,14 +1741,14 @@ function inlineHook(name, call, pattern, model, ctx, ast, depth) {
 
   for (const stmt of fnPath.node.body.body || []) {
     if (t.isReturnStatement(stmt)) continue;
-    processComponentStatement(stmt, model, ctx, ast, depth + 1, false);
+    processComponentStatement(stmt, model, ctx, hookMod, depth + 1, false);
   }
 }
 
-function processComponentStatement(stmt, model, ctx, ast, depth, isRoot) {
+function processComponentStatement(stmt, model, ctx, mod, depth, isRoot) {
   if (t.isVariableDeclaration(stmt)) {
     for (const decl of stmt.declarations) {
-      processDeclarator(decl, stmt.kind, model, ctx, ast, depth);
+      processDeclarator(decl, stmt.kind, model, ctx, mod, depth);
     }
     return;
   }
@@ -1570,7 +1764,7 @@ function processComponentStatement(stmt, model, ctx, ast, depth, isRoot) {
       return;
     }
     if (/^use[A-Z]/.test(name) && !KNOWN_HOOKS.has(name)) {
-      inlineHook(name, call, null, model, ctx, ast, depth);
+      inlineHook(name, call, null, model, ctx, mod, depth);
       return;
     }
   }
@@ -1591,7 +1785,7 @@ function processComponentStatement(stmt, model, ctx, ast, depth, isRoot) {
   ctx.warn(`Statement ignored in component body (move it into a function or useEffect): ${exprSource(stmt).slice(0, 60)}`);
 }
 
-function processDeclarator(decl, declKind, model, ctx, ast, depth) {
+function processDeclarator(decl, declKind, model, ctx, mod, depth) {
   const init = decl.init;
   const id = decl.id;
   const hook = t.isCallExpression(init) ? calleeName(init) : '';
@@ -1629,7 +1823,7 @@ function processDeclarator(decl, declKind, model, ctx, ast, depth) {
       ctx.warn(`${hook}() is not supported by Kovo.`);
       return;
     }
-    inlineHook(hook, init, id, model, ctx, ast, depth);
+    inlineHook(hook, init, id, model, ctx, mod, depth);
     return;
   }
   if (t.isIdentifier(id) && isFunctionNode(init)) {
@@ -1715,7 +1909,9 @@ function analyzeFunctionComponent(fnPath, ast, ctx, propTypes) {
 
   const body = fnPath.node.body;
   const stmts = t.isBlockStatement(body) ? body.body : [t.returnStatement(body)];
-  for (const stmt of stmts) processComponentStatement(stmt, model, ctx, ast, 0, true);
+  const mod = { ast, file: ctx.filename };
+  mod.root = mod;
+  for (const stmt of stmts) processComponentStatement(stmt, model, ctx, mod, 0, true);
 
   classifyDerived(model, ctx);
   markDomRefs(model);
@@ -2154,6 +2350,7 @@ function buildUxContent(source, filename, options = {}) {
     if (fn && (t.isFunctionDeclaration(fn) || isFunctionNode(fn))) propTypes = collectPropTypes(ast, fn);
   }
   stripTypes(ast);
+  checkGlyphs(ast, ctx);
   ctx.moduleBindings = collectModuleBindings(ast);
 
   const importNodes = [];
@@ -2321,6 +2518,7 @@ function buildUxContent(source, filename, options = {}) {
       if (!skip) helperLines.push(generator(stmt).code);
     }
   }
+  helperLines.unshift(...ctx.extraHelpers);
   if (ctx.usesKovoArgs) helperLines.push(KOVO_ARGS_HELPER);
 
   if (!templateXml && !scriptPropLines) {
@@ -2333,9 +2531,18 @@ function buildUxContent(source, filename, options = {}) {
       ctx.usedComponents.has(s.local.name) ||
       /\.(ux|tsx)$/.test(imp.source.value) ||
       resolveComponentFile(imp.source.value, ctx)));
-  const jsImportLines = importNodes
+  // Inlined hooks are compiled away: drop their import specifiers.
+  const remainingImports = importNodes
+    .map((imp) => {
+      if (!imp.specifiers.some((s) => ctx.inlinedHookImports.has(s.local.name))) return imp;
+      const specifiers = imp.specifiers.filter((s) => !ctx.inlinedHookImports.has(s.local.name));
+      return specifiers.length ? { ...imp, specifiers } : null;
+    })
+    .filter(Boolean);
+  const jsImportLines = remainingImports
     .filter((imp) => !isComponentImport(imp))
-    .map((imp) => generator(imp).code);
+    .map((imp) => generator(imp).code)
+    .concat(ctx.extraImports);
 
   if (ctx.inlineStyles.length) {
     styleCss = [styleCss, ...ctx.inlineStyles].filter((s) => s.trim()).join('\n');
@@ -2451,4 +2658,22 @@ module.exports = function () {
   };
 };
 
+/**
+ * Compiles a plain .ts/.js module from src-tsx/ (helpers, constants) to the
+ * JavaScript the .ux scripts import. Kovo hook imports are dropped: hooks are
+ * inlined into the components that call them.
+ */
+function compileScriptModule(source, filename) {
+  const ast = parser.parse(source, {
+    sourceType: 'module',
+    plugins: /\.(ts|mts)$/.test(filename) ? ['typescript'] : ['jsx', 'typescript'],
+  });
+  stripTypes(ast);
+  ast.program.body = ast.program.body.filter(
+    (s) => !(t.isImportDeclaration(s) && KOVO_MODULES.has(s.source.value)),
+  );
+  return generator(ast).code;
+}
+
 module.exports.buildUxContent = buildUxContent;
+module.exports.compileScriptModule = compileScriptModule;

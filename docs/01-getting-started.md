@@ -131,7 +131,7 @@ export default function HelloPage() {
   return (
     <div className="page">
       <text className="title">Hello Vela: {count}</text>
-      <input className="counter-btn" type="button" value="⚡ TAP ME" onClick={increment} />
+      <input className="counter-btn" type="button" value="TAP ME" onClick={increment} />
     </div>
   );
 }

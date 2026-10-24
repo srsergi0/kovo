@@ -29,7 +29,7 @@
     "url": "https://github.com/srsergi0/kovo/issues"
   },
   "scripts": {
-    "test": "node --test scripts/babel-plugin-vela-ux.test.js scripts/hpd.test.js scripts/react-semantics.test.js scripts/template-sync.test.js",
+    "test": "node --test scripts/babel-plugin-vela-ux.test.js scripts/hpd.test.js scripts/react-semantics.test.js scripts/build-jsx.test.js scripts/template-sync.test.js",
     "dev": "node scripts/dev.js",
     "dev:emulator": "node scripts/dev-emulator.js",
     "build:copy": "node scripts/copy-static.js",

@@ -4,9 +4,9 @@ import router from '@system.router';
 import StatCard from '../../components/StatCard/StatCard';
 
 const WORKOUTS = [
-  { name: '🏃 Outdoor Run', detail: '5.2 km  •  320 kcal' },
-  { name: '🚴 Road Cycling', detail: '12.4 km  •  450 kcal' },
-  { name: '🧘 Evening Yoga', detail: '35 min  •  110 kcal' }
+  { name: 'Outdoor Run', detail: '5.2 km  •  320 kcal' },
+  { name: 'Road Cycling', detail: '12.4 km  •  450 kcal' },
+  { name: 'Evening Yoga', detail: '35 min  •  110 kcal' }
 ];
 
 function triggerHaptic() {
@@ -148,12 +148,12 @@ export default function IndexPage() {
   return (
     <div className="page">
       <div className="top-status-bar">
-        <text className="app-logo">⚡ VELA-JSX OS</text>
-        <text className="battery-pill">⚡ 94%</text>
+        <text className="app-logo">VELA-JSX OS</text>
+        <text className="battery-pill">94%</text>
       </div>
 
       <StatCard
-        title="🔥 DAILY STEPS"
+        title="DAILY STEPS"
         value={steps}
         unit="/ 10,000"
         badge="85% GOAL"
@@ -161,12 +161,12 @@ export default function IndexPage() {
       />
 
       <div className="btn-row">
-        <input className="btn-card btn-step" type="button" value="⚡ +500" onClick={addSteps} />
-        <input className="btn-card btn-reset" type="button" value="🔄 RESET" onClick={resetSteps} />
-        <input className="btn-card btn-toggle" type="button" value="📋 LIST" onClick={toggleWorkouts} />
+        <input className="btn-card btn-step" type="button" value="+500" onClick={addSteps} />
+        <input className="btn-card btn-reset" type="button" value="⇄ RESET" onClick={resetSteps} />
+        <input className="btn-card btn-toggle" type="button" value="LIST" onClick={toggleWorkouts} />
       </div>
 
-      <input className="btn-nav" type="button" value="🚀 HOOKS DEMO" onClick={goToDemo} />
+      <input className="btn-nav" type="button" value="HOOKS DEMO" onClick={goToDemo} />
 
       {showWorkouts && (
         <div className="workouts-box">

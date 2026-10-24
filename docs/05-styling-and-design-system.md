@@ -53,7 +53,7 @@ export const style = `
 export default function StyledButton() {
   return (
     <div className="page">
-      <input className="btn-pill" type="button" value="⚡ ACTION" />
+      <input className="btn-pill" type="button" value="ACTION" />
     </div>
   );
 }

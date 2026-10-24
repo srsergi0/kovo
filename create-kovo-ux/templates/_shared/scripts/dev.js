@@ -6,7 +6,22 @@
 
 const fs = require('fs');
 const path = require('path');
-const { transformFile, main: fullBuild, SRC_TSX, SRC_OUT } = require('./build-jsx.js');
+const { transformFile, findAffectedFiles, main: fullBuild, SRC_TSX, SRC_OUT } = require('./build-jsx.js');
+
+function recompile(files, trigger) {
+  for (const file of files) {
+    const rel = path.relative(SRC_TSX, file);
+    const start = Date.now();
+    try {
+      if (transformFile(file)) {
+        const why = path.join(SRC_TSX, trigger) === file ? '' : ` (uses ${trigger})`;
+        console.log('\x1b[32m%s\x1b[0m', `⚡ Recompiled ${rel}${why} in ${Date.now() - start}ms`);
+      }
+    } catch (err) {
+      console.error('\x1b[31m%s\x1b[0m', `❌ Failed to recompile ${rel}: ${err.message}`);
+    }
+  }
+}
 
 console.log('\x1b[36m%s\x1b[0m', '⚡ Kovo Dev Server starting...');
 
@@ -34,24 +49,22 @@ function handleFileChange(eventType, filename) {
   changeDebounce.set(filename, setTimeout(() => {
     changeDebounce.delete(filename);
 
+    const isSource = /\.(tsx|jsx|ts|js)$/i.test(filename);
+
     if (!fs.existsSync(fullPath)) {
-      const outUx = path.join(SRC_OUT, filename.replace(/\.tsx?$/, '.ux'));
+      const outUx = path.join(SRC_OUT, filename.replace(/\.(t|j)sx?$/, '.ux'));
       if (fs.existsSync(outUx)) {
         fs.unlinkSync(outUx);
         console.log('\x1b[33m%s\x1b[0m', `🗑️ Deleted ${filename} -> ${path.relative(process.cwd(), outUx)}`);
       }
+      // Importers may have inlined the deleted file: rebuild them so the error surfaces.
+      if (isSource) recompile(findAffectedFiles(fullPath).filter((f) => f !== fullPath), filename);
       return;
     }
 
-    if (/\.(tsx|jsx)$/i.test(filename)) {
-      const start = Date.now();
-      try {
-        transformFile(fullPath);
-        const duration = Date.now() - start;
-        console.log('\x1b[32m%s\x1b[0m', `⚡ Recompiled ${filename} in ${duration}ms`);
-      } catch (err) {
-        console.error('\x1b[31m%s\x1b[0m', `❌ Failed to recompile ${filename}: ${err.message}`);
-      }
+    if (isSource) {
+      // Inlined components and hooks are baked into their importers, so rebuild those too.
+      recompile(findAffectedFiles(fullPath), filename);
     } else if (filename.endsWith('manifest.json') || filename.endsWith('.png') || filename.endsWith('.jpg')) {
       try {
         const target = path.join(SRC_OUT, filename);

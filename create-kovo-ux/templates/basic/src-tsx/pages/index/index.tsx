@@ -92,7 +92,7 @@ export default function IndexPage() {
 
   return (
     <div className="page">
-      <text className="title">⌚ Kovo</text>
+      <text className="title">Kovo</text>
 
       <div className="counter-box">
         <text className="count-label">COUNTER</text>
@@ -100,8 +100,8 @@ export default function IndexPage() {
       </div>
 
       <div className="btn-row">
-        <input className="btn-inc" type="button" value="⚡ +1" onClick={increment} />
-        <input className="btn-reset" type="button" value="🔄 RESET" onClick={reset} />
+        <input className="btn-inc" type="button" value="+1" onClick={increment} />
+        <input className="btn-reset" type="button" value="⇄ RESET" onClick={reset} />
       </div>
     </div>
   );

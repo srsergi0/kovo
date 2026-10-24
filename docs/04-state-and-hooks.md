@@ -146,7 +146,7 @@ export default function SmartwatchDashboard() {
   return (
     <div className="page">
       <text>Steps: {steps}</text>
-      <input type="button" value="⚡ +500" onClick={addSteps} />
+      <input type="button" value="+500" onClick={addSteps} />
       <input type="button" value="🔄 RESET" onClick={resetSteps} />
     </div>
   );

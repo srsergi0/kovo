@@ -106,7 +106,8 @@ const pkg = {
     'build:copy': 'node scripts/copy-static.js',
     'build:jsx': 'node scripts/build-jsx.js',
     build: 'bun run clean && bun run build:copy && bun run build:jsx',
-    'aiot:build': 'bun run build && aiot build --enable-custom-component',
+    'aiot:build': 'bun run build && aiot build --complete-feature',
+    release: 'node scripts/release.js',
     clean: "node -e \"require('fs').rmSync('src',{recursive:true,force:true})\"",
   },
   devDependencies: {

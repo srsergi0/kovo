@@ -519,7 +519,7 @@ describe('Template output', () => {
         return <text className={\`t \${name ? 'on' : ''}\`}>Hi {\`\${name}!\`}</text>;
       }
     `);
-    assert.match(template(content), /<text class="t \{\{name \? 'on' : ''\}\}">Hi \{\{name\}\}!<\/text>/);
+    assert.match(template(content), /<text class="t \{\{name \? 'on' : ''\}\}" static>Hi \{\{name\}\}!<\/text>/);
   });
 
   test('whitespace between expressions follows JSX rules', () => {
@@ -529,7 +529,7 @@ describe('Template output', () => {
         return <text>{a} {b}</text>;
       }
     `);
-    assert.match(template(content), /<text>\{\{a\}\} \{\{b\}\}<\/text>/);
+    assert.match(template(content), /<text static>\{\{a\}\} \{\{b\}\}<\/text>/);
   });
 
   test('key becomes tid when it is a property of the item', () => {
@@ -539,7 +539,7 @@ describe('Template output', () => {
         return <div>{items.map((it) => <text key={it.id}>{it.id}</text>)}</div>;
       }
     `);
-    assert.match(template(content), /<text for="\{\{it in items\}\}" tid="id">/);
+    assert.match(template(content), /<text static for="\{\{it in items\}\}" tid="id">/);
     assert.doesNotMatch(content, /key=/);
   });
 
@@ -561,7 +561,7 @@ describe('Template output', () => {
         return <div>{items.map(({ id, label }) => <text key={id}>{label}</text>)}</div>;
       }
     `);
-    assert.match(template(content), /<text for="\{\{kovoItem in items\}\}" tid="id">\{\{kovoItem\.label\}\}<\/text>/);
+    assert.match(template(content), /<text static for="\{\{kovoItem in items\}\}" tid="id">\{\{kovoItem\.label\}\}<\/text>/);
   });
 
   test('map callback with a block body that only returns', () => {
@@ -571,7 +571,7 @@ describe('Template output', () => {
         return <div>{items.map((i) => { return <text>{i}</text>; })}</div>;
       }
     `);
-    assert.match(template(content), /<text for="\{\{i in items\}\}">\{\{i\}\}<\/text>/);
+    assert.match(template(content), /<text static for="\{\{i in items\}\}">\{\{i\}\}<\/text>/);
   });
 
   test('per-item conditions wrap the loop in <block for> (if beats for on one tag)', () => {
@@ -591,7 +591,7 @@ describe('Template output', () => {
         return <div>{items.length > 0 && items.map((i) => <text>{i}</text>)}</div>;
       }
     `);
-    assert.match(template(content), /<block if="\{\{items\.length > 0\}\}">\s*<text for="\{\{i in items\}\}">/);
+    assert.match(template(content), /<block if="\{\{items\.length > 0\}\}">\s*<text static for="\{\{i in items\}\}">/);
   });
 
   test('functions in bindings are hoisted to computed', () => {
@@ -771,6 +771,108 @@ describe('Component inlining', () => {
   test('options.inline=false disables inlining', () => {
     const { content } = transform(page(`<div><Badge /></div>`), path.join(dir, 'home.tsx'), { inline: false });
     assert.match(content, /<import name="badge"/);
+  });
+});
+
+// =========================================================================
+// Vela optimization guide (guide/best-practice/memory, guide/other/tips)
+// =========================================================================
+
+describe('Vela optimizations', () => {
+  const comp = (body, jsx, extra = '') => transform(`
+    import { useState, useEffect } from 'kovo-ux';
+    ${extra}
+    export default function C() {
+      ${body}
+      return (${jsx});
+    }
+  `, '/app/src-tsx/components/C/C.tsx');
+
+  test('nodes bound only to constants are marked static', () => {
+    const { content } = comp(
+      "const title = 'Hi'; const items = [{ id: 1 }]; const [n, setN] = useState(0);",
+      '<div><text>{title}</text><text>{n}</text>{items.map((i) => <text key={i.id}>{i.id}</text>)}<text onClick={() => setN(1)}>{title}</text></div>',
+    );
+    const tpl = template(content);
+    assert.match(tpl, /<text static>\{\{title\}\}<\/text>/);
+    assert.match(tpl, /<text>\{\{n\}\}<\/text>/);
+    assert.match(tpl, /<text static for="\{\{i in items\}\}" tid="id">/);
+    assert.match(tpl, /<text @click="kovoHandler0" static>\{\{title\}\}<\/text>/);
+  });
+
+  test('state never shown leaves the component ViewModel', () => {
+    const { content } = comp(
+      'const [n, setN] = useState(0); const [clicks, setClicks] = useState(0);',
+      '<text onClick={() => setClicks(clicks + 1)}>{n}</text>',
+    );
+    const s = script(content);
+    assert.match(s, /data: \{\s*n: 0\s*\}/);
+    assert.match(s, /onInit\(\) \{\s*this\.clicks = 0;/);
+  });
+
+  test('state read by computed values or watched deps stays reactive', () => {
+    const { content } = comp(
+      'const [a, setA] = useState(1); const [b, setB] = useState(2); const twice = a * 2; useEffect(() => { go(); }, [b]);',
+      '<text>{twice}</text>',
+    );
+    assert.match(script(content), /data: \{\s*a: 1,\s*b: 2\s*\}/);
+  });
+
+  test('pages warn instead (state may receive a router param)', () => {
+    const { content, warnings } = transform(`
+      import { useState } from 'kovo-ux';
+      export default function P() { const [id, setId] = useState(0); return <text>x</text>; }
+    `, '/app/src-tsx/pages/p/p.tsx');
+    assert.match(script(content), /protected: \{\s*id: 0\s*\}/);
+    assert.ok(warnings.some((w) => /State "id" is never shown/.test(w)));
+  });
+
+  test('array setters with a self spread update in place', () => {
+    const { content } = comp(
+      'const [list, setList] = useState([]); function add(x) { setList([...list, x]); setList([x, ...list]); setList([...list]); }',
+      '<text>{list.length}</text>',
+    );
+    const s = script(content);
+    assert.match(s, /this\.list\.push\(x\);/);
+    assert.match(s, /this\.list\.unshift\(x\);/);
+    assert.match(s, /this\.list = \[\.\.\.this\.list\];/);
+  });
+
+  test('CSS rules for classes the template never uses are removed', () => {
+    const { content } = comp(
+      'const [on, setOn] = useState(false);',
+      "<div className=\"box\"><text className={on ? 'on' : 'off'}>x</text></div>",
+      "export const style = '.box { a: 1 } .on { b: 2 } .off { c: 3 } .unused { d: 4 } .box, .gone { e: 5 } text { f: 6 }';",
+    );
+    const css = content.slice(content.indexOf('<style>'), content.indexOf('</style>'));
+    assert.match(css, /\.box \{ a: 1 \}/);
+    assert.match(css, /\.on \{ b: 2 \}/);
+    assert.match(css, /\.off \{ c: 3 \}/);
+    assert.match(css, /\.box \{ e: 5 \}/);
+    assert.match(css, /text \{ f: 6 \}/);
+    assert.doesNotMatch(css, /unused|gone/);
+  });
+
+  test('CSS is kept when a class name is only known at runtime', () => {
+    const { content } = comp(
+      "const [cls, setCls] = useState('a');",
+      '<text className={cls}>x</text>',
+      "export const style = '.a { x: 1 } .unused { y: 2 }';",
+    );
+    assert.match(content, /\.unused/);
+  });
+
+  test('image src template strings become a single binding', () => {
+    const { content } = comp(
+      "const [type, setType] = useState('a');",
+      '<image src={`/common/${type}.png`} />',
+    );
+    assert.match(template(content), /<image src="\{\{'\/common\/' \+ type \+ '\.png'\}\}"\/>/);
+  });
+
+  test('setInterval in an effect without cleanup warns', () => {
+    const { warnings } = comp('useEffect(() => { setInterval(() => {}, 1000); }, []);', '<text>x</text>');
+    assert.ok(warnings.some((w) => /setInterval without a cleanup/.test(w)));
   });
 });
 

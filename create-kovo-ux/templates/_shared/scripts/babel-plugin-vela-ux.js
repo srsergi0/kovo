@@ -119,6 +119,9 @@ function createContext(filename, options) {
     inlinedComponents: new Set(),
     moduleBindings: new Map(),
     usesKovoArgs: false,
+    usedClasses: new Set(),
+    classesUnknown: false,
+    isFunctionComponent: false,
     // Function component model while its template is being serialized.
     component: null,
     // Stack of active `.map()` loops: { item, index, names: Set }.
@@ -492,6 +495,49 @@ function lintCss(css, ctx) {
   }
 }
 
+/**
+ * Vela memory guide: remove unused CSS. Drops selectors whose classes never
+ * appear in the template (inlined components bring their whole stylesheet).
+ * Tag and #id selectors are kept.
+ */
+function pruneUnusedCss(css, used) {
+  const src = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const open = src.indexOf('{', i);
+    if (open === -1) {
+      out += src.slice(i);
+      break;
+    }
+    let depth = 1;
+    let j = open + 1;
+    while (j < src.length && depth) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}') depth--;
+      j++;
+    }
+    const prelude = src.slice(i, open);
+    const body = src.slice(open + 1, j - 1);
+    const lead = /^\s*/.exec(prelude)[0];
+    const sel = prelude.trim();
+    if (/^@(media|supports)\b/.test(sel)) {
+      const inner = pruneUnusedCss(body, used);
+      if (inner.trim()) out += `${prelude}{${inner}}`;
+    } else if (sel.startsWith('@')) {
+      out += `${prelude}{${body}}`;
+    } else {
+      const kept = sel.split(',').map((s) => s.trim()).filter((s) => {
+        const classes = s.match(/\.[\w-]+/g);
+        return !classes || classes.every((c) => used.has(c.slice(1)));
+      });
+      if (kept.length) out += `${lead}${kept.join(', ')} {${body}}`;
+    }
+    i = j;
+  }
+  return out;
+}
+
 function checkSelector(selector, ctx) {
   for (const raw of selector.split(',')) {
     const sel = raw.trim();
@@ -757,6 +803,7 @@ function serializeAttribute(attr, ctx, element) {
   }
 
   if (name === 'className' || name === 'class') {
+    trackClassNames(value, ctx);
     return `class="${serializeStringValue(value, ctx)}"`;
   }
 
@@ -793,7 +840,8 @@ function serializeAttribute(attr, ctx, element) {
     if (t.isStringLiteral(expr)) {
       return `${camelToKebab(name)}="${escapeXml(expr.value)}"`;
     }
-    if (t.isTemplateLiteral(expr)) {
+    // Vela docs: image src must be one binding, not "/common/{{type}}" (compiler warning).
+    if (t.isTemplateLiteral(expr) && name !== 'src') {
       return `${camelToKebab(name)}="${serializeInterpolatedTemplate(expr, ctx)}"`;
     }
     const velaVal = exprToVelaBinding(expr, ctx);
@@ -801,6 +849,107 @@ function serializeAttribute(attr, ctx, element) {
     return `${camelToKebab(name)}="{{${safeVal}}}"`;
   }
   return null;
+}
+
+/**
+ * Possible values of a class expression, or null when they cannot be known
+ * statically (then unused-CSS pruning is skipped for the file).
+ */
+function classCandidates(expr) {
+  expr = unwrapParens(expr);
+  if (t.isStringLiteral(expr)) return [expr.value];
+  if (t.isNullLiteral(expr) || t.isBooleanLiteral(expr) || t.isIdentifier(expr, { name: 'undefined' })) return [''];
+  if (t.isConditionalExpression(expr)) {
+    const a = classCandidates(expr.consequent);
+    const b = classCandidates(expr.alternate);
+    return a && b ? [...a, ...b] : null;
+  }
+  if (t.isLogicalExpression(expr)) {
+    const r = classCandidates(expr.right);
+    if (!r) return null;
+    if (expr.operator === '&&') return r;
+    const l = classCandidates(expr.left);
+    return l ? [...l, ...r] : null;
+  }
+  const isWholeToken = (before, after) => (!before || /\s$/.test(before)) && (!after || /^\s/.test(after));
+  if (t.isTemplateLiteral(expr)) {
+    const out = expr.quasis.map((q) => q.value.cooked);
+    for (let i = 0; i < expr.expressions.length; i++) {
+      const c = classCandidates(expr.expressions[i]);
+      if (!c || !isWholeToken(expr.quasis[i].value.cooked, expr.quasis[i + 1].value.cooked)) return null;
+      out.push(...c);
+    }
+    return out;
+  }
+  if (t.isBinaryExpression(expr, { operator: '+' })) {
+    const l = classCandidates(expr.left);
+    const r = classCandidates(expr.right);
+    if (!l || !r) return null;
+    if (l.some((s) => s && !/\s$/.test(s)) && r.some((s) => s && !/^\s/.test(s))) return null;
+    return [...l, ...r];
+  }
+  return null;
+}
+
+function trackClassNames(value, ctx) {
+  const add = (s) => s.split(/\s+/).filter(Boolean).forEach((c) => ctx.usedClasses.add(c));
+  if (value === null) return;
+  if (t.isStringLiteral(value)) {
+    add(value.value);
+    return;
+  }
+  if (!t.isJSXExpressionContainer(value)) return;
+  const values = classCandidates(foldConstants(value.expression));
+  if (values) values.forEach(add);
+  else ctx.classesUnknown = true;
+}
+
+/** True when an expression only reads values that never change after load. */
+function isStaticExpr(expr, ctx) {
+  let pure = true;
+  t.traverseFast(expr, (n) => {
+    if (t.isCallExpression(n) || t.isNewExpression(n) || isFunctionNode(n) || t.isJSXElement(n) ||
+        t.isAssignmentExpression(n) || t.isUpdateExpression(n)) pure = false;
+  });
+  if (!pure) return false;
+  const comp = ctx.component;
+  const staticLoopVars = new Set();
+  for (const loop of ctx.loops) {
+    if (!loop.static) continue;
+    staticLoopVars.add(loop.item);
+    if (loop.index) staticLoopVars.add(loop.index);
+  }
+  for (const name of referencedNames(expr)) {
+    if (TEMPLATE_GLOBALS.has(name) || staticLoopVars.has(name) || comp.constants.has(name)) continue;
+    if (ctx.moduleBindings.get(name) === 'value' && !comp.memberNames.has(name)) continue;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Vela memory guide: nodes whose bindings never change can be marked `static`
+ * so the framework does not keep them dynamic.
+ */
+function isStaticNode(node, ctx) {
+  if (!ctx.component || ctx.options.autoStatic === false) return false;
+  const exprs = [];
+  for (const a of node.openingElement.attributes) {
+    if (!t.isJSXAttribute(a)) return false;
+    const n = t.isJSXIdentifier(a.name) ? a.name.name : '';
+    if (n === 'static') return false;
+    if (EVENT_MAP[n] || /^on[A-Z]/.test(n) || ['ref', 'key', 'tid', 'if', 'elif', 'else', 'for'].includes(n)) continue;
+    if (t.isJSXExpressionContainer(a.value)) exprs.push(a.value.expression);
+  }
+  for (const c of node.children) {
+    if (!t.isJSXExpressionContainer(c) || t.isJSXEmptyExpression(c.expression)) continue;
+    const e = unwrapParens(c.expression);
+    // Children that add or remove nodes keep the element dynamic.
+    if (t.isJSXElement(e) || t.isJSXFragment(e) || t.isLogicalExpression(e) || t.isConditionalExpression(e) ||
+        t.isCallExpression(e)) return false;
+    exprs.push(e);
+  }
+  return exprs.length > 0 && exprs.every((e) => isStaticExpr(e, ctx));
 }
 
 function directiveAttrs(opts) {
@@ -857,6 +1006,7 @@ function serializeJSXElement(node, ctx, opts = {}) {
     const s = serializeAttribute(attr, ctx, element);
     if (s) attrs.push(s);
   }
+  if (isStaticNode(node, ctx)) attrs.push('static');
   attrs.push(...directiveAttrs(opts));
 
   const attrStr = attrs.length ? ' ' + attrs.join(' ') : '';
@@ -1183,7 +1333,12 @@ function serializeMap(memberExpr, args, ctx) {
   const arraySrc = exprToVelaBinding(memberExpr.object, ctx);
   const forExpr = indexName ? `(${indexName}, ${itemName}) in ${arraySrc}` : `${itemName} in ${arraySrc}`;
 
-  const loop = { item: itemName, index: indexName, destructured: new Set(destructured.keys()) };
+  const loop = {
+    item: itemName,
+    index: indexName,
+    destructured: new Set(destructured.keys()),
+    static: !!ctx.component && isStaticExpr(memberExpr.object, ctx),
+  };
   ctx.loops.push(loop);
   try {
     const tid = keyToTid(keyAttrOf(body), loop, ctx) || undefined;
@@ -1991,6 +2146,24 @@ function rewriteFunction(fnNode, model, ctx) {
           } else {
             rhs = argPath.node;
           }
+          // Vela memory guide: update arrays in place instead of reallocating them.
+          // setList([...list, a]) -> list.push(a); setList([a, ...list]) -> list.unshift(a)
+          const isSelf = (n) => t.isMemberExpression(n) && !n.computed && t.isIdentifier(n.property, { name: stateName }) &&
+            (t.isThisExpression(n.object) || t.isIdentifier(n.object, { name: 'kovoSelf' }));
+          if (t.isArrayExpression(rhs) && rhs.elements.length > 1 && ctx.options.inPlaceUpdates !== false) {
+            const els = rhs.elements;
+            const spreads = els.filter((e) => t.isSpreadElement(e));
+            if (spreads.length === 1 && isSelf(spreads[0].argument) && els.every((e) => e)) {
+              if (els[0] === spreads[0]) {
+                p.replaceWith(t.callExpression(t.memberExpression(target(), t.identifier('push')), els.slice(1)));
+                return;
+              }
+              if (els[els.length - 1] === spreads[0]) {
+                p.replaceWith(t.callExpression(t.memberExpression(target(), t.identifier('unshift')), els.slice(0, -1)));
+                return;
+              }
+            }
+          }
           p.replaceWith(t.assignmentExpression('=', target(), rhs));
         } else if (model.eventProps.has(name)) {
           p.replaceWith(t.callExpression(member(p, '$emit'), [
@@ -2148,9 +2321,45 @@ function buildFunctionScript(model, ctx) {
     ctx.warn('Pages do not receive props; router params arrive as state. Declare them with useState().');
   }
 
+  // Vela memory guide: data the UI never reads should not live in the ViewModel
+  // (every data field gets observers). "UI" = template, computed values and watched deps.
+  const uiNames = new Set();
+  (function collect(n, parent) {
+    if (!n || typeof n.type !== 'string') return;
+    // Event handlers run code; they do not display values.
+    if (t.isJSXAttribute(n)) {
+      const an = t.isJSXIdentifier(n.name) ? n.name.name : '';
+      if (EVENT_MAP[an] || /^on[A-Z]/.test(an) || an === 'ref' || an === 'key') return;
+    }
+    if (t.isIdentifier(n) && (!parent || t.isReferenced(n, parent))) uiNames.add(n.name);
+    for (const k of t.VISITOR_KEYS[n.type] || []) {
+      const c = n[k];
+      if (Array.isArray(c)) c.forEach((x) => collect(x, n));
+      else collect(c, n);
+    }
+  })(model.templateNode, null);
+  for (const c of model.computed.values()) referencedNames(c.fn || c.expr).forEach((n) => uiNames.add(n));
+  for (const eff of model.effects) {
+    if (eff.deps && t.isArrayExpression(eff.deps)) {
+      depPaths(eff.deps, model, ctx).forEach((p) => uiNames.add(p.split('.')[0]));
+    }
+  }
+
   // data: pages use `protected` so in-app router params can override values.
   const data = [];
   for (const [name, { init }] of model.state) {
+    if (!uiNames.has(name)) {
+      if (model.kind === 'component' && ctx.options.trimData !== false) {
+        lifecycle.onInit.push(t.expressionStatement(t.assignmentExpression('=', thisMember(name), t.cloneNode(init, true))));
+        continue;
+      }
+      if (model.kind === 'page') {
+        ctx.warn(
+          `State "${name}" is never shown. Unless it receives a router param, use useRef() to keep it ` +
+          'out of the ViewModel (Vela memory guide: non-UI data adds observers).',
+        );
+      }
+    }
     if (isStaticInit(init, model)) {
       data.push(t.objectProperty(t.identifier(name), t.cloneNode(init, true)));
     } else {
@@ -2186,6 +2395,15 @@ function buildFunctionScript(model, ctx) {
     let block = eff.fn.body;
     if (!t.isBlockStatement(block)) block = t.blockStatement([t.expressionStatement(block)]);
     const hasCleanup = hasTopLevelReturn(block);
+    if (!hasCleanup) {
+      let interval = false;
+      t.traverseFast(block, (n) => {
+        if (t.isCallExpression(n) && t.isIdentifier(n.callee, { name: 'setInterval' })) interval = true;
+      });
+      if (interval) {
+        ctx.warn('useEffect() starts a setInterval without a cleanup. Return () => clearInterval(id) so the timer stops on onDestroy (Vela memory guide).');
+      }
+    }
     let paths = [];
     if (!eff.deps) {
       if (!warnedNoDeps) {
@@ -2429,6 +2647,7 @@ function buildUxContent(source, filename, options = {}) {
       else if (t.isIdentifier(decl)) fnPath = resolveExportedFunction(p.parentPath, decl);
       if (fnPath) {
         componentPathNode = fnPath.parentPath.isVariableDeclarator() ? fnPath.parent : null;
+        ctx.isFunctionComponent = true;
         const res = processFunctionalComponent(fnPath, ctx, ast, propTypes);
         if (res.templateXml) templateXml = res.templateXml;
         if (res.styleCss) styleCss = res.styleCss;
@@ -2558,6 +2777,10 @@ function buildUxContent(source, filename, options = {}) {
     styleCss = [styleCss, ...ctx.inlineStyles].filter((s) => s.trim()).join('\n');
   }
   if (styleCss.trim() && !styleLang) lintCss(styleCss, ctx);
+  if (styleCss.trim() && !styleLang && ctx.isFunctionComponent && templateXml && !ctx.classesUnknown &&
+      ctx.options.pruneCss !== false) {
+    styleCss = pruneUnusedCss(styleCss, ctx.usedClasses);
+  }
 
   const parts = [];
   if (templateXml) {

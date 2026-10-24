@@ -19,7 +19,7 @@ try {
 
 console.log('\x1b[36m%s\x1b[0m', '\n📦 Step 2: Compiling .ux -> .rpk package (aiot build)...');
 try {
-  execSync('aiot build --enable-custom-component', { cwd: ROOT, stdio: 'inherit' });
+  execSync('aiot build --complete-feature', { cwd: ROOT, stdio: 'inherit' });
   console.log('\x1b[32m%s\x1b[0m', '✓ .rpk package generated successfully in dist/!');
 } catch (e) {
   console.error('\x1b[31m%s\x1b[0m', '❌ aiot build failed.');

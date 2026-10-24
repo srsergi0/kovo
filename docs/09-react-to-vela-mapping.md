@@ -29,7 +29,7 @@ Kovo compiles React-style components onto **native Vela ViewModel features**. Th
 | `useEffect(() => { ...; return cleanup })` | cleanup runs before re-runs and in `onDestroy` |
 | child prop `onSelect` + `onSelect(a, b)` | `this.$emit('select', { kovoArgs: [a, b] })` |
 | parent `<Child onSelect={fn} />` | `@select="kovoHandlerN"` → `fn(...kovoArgs(evt))` |
-| custom hook `useX()` (same file) | inlined; params substituted, `const { a: b } = useX()` renames |
+| custom hook `useX()` (same file or relative import) | inlined; params substituted, `const { a: b } = useX()` renames; the hook module's imports and helpers are copied into the page, and the hook import is dropped |
 | TypeScript props `({ title }: { title: string })` | `props: { title: { type: String } }` |
 
 Rewriting is **scope-aware** (Babel bindings): parameters, local variables, object keys and strings that share a name with state are never touched. Inside nested `function () {}` callbacks Kovo uses a `const kovoSelf = this` alias.
@@ -75,7 +75,17 @@ Stateful components keep the normal `<import name="..." src="....ux">` path.
 | `display` only supports `flex` and `none` | warning |
 | No `<slot>` is documented | warning when children are passed to a component |
 | Early `return` in a component | compile error — use a ternary in the returned JSX |
-| Imported hooks | warning — only same-file hooks are inlined |
+| Hooks imported from packages (non-relative paths) | warning — only same-file and relative-import hooks are inlined |
+
+### Glyphs: no emoji in the watch font
+
+The system font is a CJK font without emoji. Verified on the Vela emulator:
+
+| Renders | Empty box |
+| :--- | :--- |
+| `← → ↑ ↓ ⇄` `● ○ ■ □ ▲ ▼ ◆ ★ ☆` `✓ ✕` `° ± × ÷ • · … — – € £ ¥ « »`, Chinese, Japanese | every emoji (`🔥 ⚡ ⌚ ⚙ ☀ ♥ ✔ ▶ ◀`…), `↻ ♡ ♪ ♫ ✗`, Korean |
+
+Kovo warns when on-screen text (JSX text, attribute values, string and template literals outside `console.*`) contains a missing glyph and suggests a verified replacement (`✔ → ✓`, `🔄 → ⇄`, `⭐ → ★`, …). Use a PNG `<image>` for real icons (`<image>` supports png and jpg). Disable the check with the option `{ checkGlyphs: false }`.
 
 Use `export const styleLang = 'less'` (or `'scss'`) to emit `<style lang="...">`; the CSS lint is skipped for preprocessed styles.
 
@@ -83,6 +93,7 @@ Use `export const styleLang = 'less'` (or `'scss'`) to emit `<style lang="...">`
 
 ## ⚠️ 4. Behaviour differences from React
 
+- **The dev watcher rebuilds importers.** Inlined components and hooks are baked into the files that use them, so `bun run dev` recompiles every importer when one of them changes. `.tsx` files without a default export (hook/helper modules) are not compiled on their own.
 - **No re-render cycle.** A component body runs once at compile time. `useEffect` without a dependency array runs once (Kovo warns). Use `[deps]` to re-run through `$watch`.
 - **Only state, props and computed values can be watched.** Other dependencies are ignored with a warning.
 - **Event payloads.** Kovo children send `{ kovoArgs: [...] }`. Hand-written `.ux` children that `$emit('x', payload)` still work: the parent receives `payload` as its single argument.

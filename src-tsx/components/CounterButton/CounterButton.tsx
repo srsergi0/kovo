@@ -8,7 +8,7 @@ export interface CounterButtonProps {
 
 export const style = `
   .counter-btn { width: 80px; height: 40px; background-color: #2ecc71; border-radius: 20px; }
-  .counter-btn text { color: #ffffff; font-size: 16px; text-align: center; }
+  .counter-btn-text { color: #ffffff; font-size: 16px; text-align: center; }
 `;
 
 export default function CounterButton({ value = 0, label = '' }: CounterButtonProps) {
@@ -21,7 +21,7 @@ export default function CounterButton({ value = 0, label = '' }: CounterButtonPr
 
   return (
     <div className="counter-btn" onClick={handleTap}>
-      <text>{label}: {internalCount}</text>
+      <text className="counter-btn-text">{label}: {internalCount}</text>
     </div>
   );
 }

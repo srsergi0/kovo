@@ -390,12 +390,101 @@ describe('Custom hooks', () => {
     assert.match(script(content), /flip\(\) \{\s*this\.lightOn = !this\.lightOn;/);
   });
 
-  test('hooks that are not in the file warn', () => {
+  test('hooks that cannot be resolved warn', () => {
     const { warnings } = transform(`
       import { useThing } from './hooks';
-      export default function P() { const { a } = useThing(); return <text>x</text>; }
+      import { useLib } from 'some-lib';
+      export default function P() { const { a } = useThing(); const { b } = useLib(); return <text>x</text>; }
     `);
-    assert.ok(warnings.some((w) => /useThing\(\) is not defined in this file/.test(w)));
+    assert.ok(warnings.some((w) => /useThing\(\) could not be inlined: "\.\/hooks" could not be resolved/.test(w)));
+    assert.ok(warnings.some((w) => /useLib\(\) could not be inlined: it is imported from "some-lib"/.test(w)));
+  });
+});
+
+describe('Imported custom hooks', () => {
+  let dir;
+  before(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kovo-hooks-'));
+    fs.mkdirSync(path.join(dir, 'hooks'));
+    fs.mkdirSync(path.join(dir, 'lib'));
+    fs.mkdirSync(path.join(dir, 'pages'));
+    fs.writeFileSync(path.join(dir, 'lib', 'format.ts'), `
+      export function pad(n: number): string { return n < 10 ? '0' + n : String(n); }
+    `);
+    fs.writeFileSync(path.join(dir, 'hooks', 'useToggle.ts'), `
+      import { useState } from 'kovo-ux';
+      export default function useToggle(initial = false) {
+        const [on, setOn] = useState(initial);
+        function toggle() { setOn(!on); }
+        return [on, toggle];
+      }
+    `);
+    fs.writeFileSync(path.join(dir, 'hooks', 'index.ts'), `
+      import { useState, useEffect } from 'kovo-ux';
+      import vibrator from '@system.vibrator';
+      import { pad } from '../lib/format';
+      import useToggle from './useToggle';
+
+      const STEP = 2;
+      function buzz() { vibrator.vibrate({ mode: 'short' }); }
+
+      export function useClock(start: number) {
+        const [secs, setSecs] = useState(start);
+        const [running, toggleRunning] = useToggle(true);
+        const label = pad(secs);
+        useEffect(() => {
+          const id = setInterval(() => { if (running) setSecs((s) => s + STEP); }, 1000);
+          return () => clearInterval(id);
+        }, []);
+        function reset() { buzz(); setSecs(start); }
+        return { secs, label, running, toggleRunning, reset };
+      }
+    `);
+  });
+  after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const compile = () => transform(`
+    import { useClock } from '../hooks';
+    import router from '@system.router';
+    export default function Home() {
+      const { label, running, toggleRunning: toggle, reset } = useClock(5);
+      return <div onClick={reset}><text onClick={toggle}>{label} {running}</text></div>;
+    }
+  `, path.join(dir, 'pages', 'home.tsx'));
+
+  test('hook state, computed values, effects and nested hooks are inlined', () => {
+    const { content, warnings } = compile();
+    const s = script(content);
+    assert.deepEqual(warnings, []);
+    assert.match(s, /protected: \{\s*secs: 5,\s*running: true\s*\}/);
+    assert.match(s, /label\(\) \{\s*return pad\(this\.secs\);/);
+    assert.match(s, /if \(this\.running\) this\.secs = this\.secs \+ STEP;/);
+    assert.match(s, /toggle\(\) \{\s*this\.running = !this\.running;/);
+    assert.match(s, /reset\(\) \{\s*buzz\(\);\s*this\.secs = 5;/);
+    assert.match(template(content), /@click="toggle"/);
+  });
+
+  test('module dependencies are brought along and hook imports dropped', () => {
+    const s = script(compile().content);
+    assert.doesNotMatch(s, /from '\.\.\/hooks'/);
+    assert.doesNotMatch(s, /kovo-ux/);
+    assert.match(s, /import router from '@system\.router';/);
+    assert.match(s, /import vibrator from '@system\.vibrator';/);
+    assert.match(s, /import \{ pad \} from '\.\.\/lib\/format';/);
+    assert.match(s, /const STEP = 2;/);
+    assert.match(s, /function buzz\(\) \{/);
+  });
+
+  test('a clashing module name warns', () => {
+    const { warnings } = transform(`
+      import { useClock } from '../hooks';
+      const STEP = 99;
+      export default function Home() {
+        const { secs } = useClock(1);
+        return <text>{secs}</text>;
+      }
+    `, path.join(dir, 'pages', 'home.tsx'));
+    assert.ok(warnings.some((w) => /"STEP" from index\.ts clashes/.test(w)));
   });
 });
 
@@ -700,6 +789,26 @@ describe('Validation', () => {
     assert.ok(warnings.some((w) => /descendant/.test(w)));
     assert.ok(warnings.some((w) => /pseudo/.test(w)));
     assert.ok(warnings.some((w) => /display: block/.test(w)));
+  });
+
+  test('characters missing from the watch font are reported with tested replacements', () => {
+    const { warnings } = transform(`
+      const LABELS = ['🔥 Hot'];
+      export default function P() {
+        console.log('🚀 logs are ignored');
+        return <div><text>✔ Done</text><input type="button" value={\`🔄 Reset\`} /><text>★ ← ok</text></div>;
+      }
+    `);
+    const w = warnings.find((x) => /cannot draw/.test(x));
+    assert.ok(w, 'glyph warning expected');
+    assert.match(w, /: 🔥 ✔ 🔄\./);
+    assert.match(w, /✔ → ✓, 🔄 → ⇄/);
+    assert.doesNotMatch(w, /🚀|★|←/);
+  });
+
+  test('checkGlyphs: false disables the glyph check', () => {
+    const { warnings } = transform(`export default function P() { return <text>🔥</text>; }`, '<test>', { checkGlyphs: false });
+    assert.ok(!warnings.some((x) => /cannot draw/.test(x)));
   });
 
   test('styleLang emits <style lang> and skips the lint', () => {

@@ -92,7 +92,7 @@ export default function SettingsPage() {
 
   return (
     <div className="page">
-      <text className="title">⚙ SETTINGS & CONFIG</text>
+      <text className="title">SETTINGS & CONFIG</text>
 
       <div className="setting-row" onClick={toggleHaptics}>
         <text className="label">HAPTIC FEEDBACK</text>

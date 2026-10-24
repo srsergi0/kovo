@@ -209,7 +209,7 @@ export default function NetworkPage() {
   return (
     <div className="page">
       <div className="header-row">
-        <text className="header-title">🌐 NETWORK FETCH</text>
+        <text className="header-title">NETWORK FETCH</text>
         <input className="back-btn" type="button" value="◄ BACK" onClick={goBack} />
       </div>
 
@@ -220,13 +220,13 @@ export default function NetworkPage() {
       </div>
 
       <div className="grid-row">
-        <input className="net-btn btn-get" type="button" value="📡 GET REQUEST" onClick={handleGet} />
-        <input className="net-btn btn-post" type="button" value="📤 POST JSON" onClick={handlePost} />
+        <input className="net-btn btn-get" type="button" value="GET REQUEST" onClick={handleGet} />
+        <input className="net-btn btn-post" type="button" value="POST JSON" onClick={handlePost} />
       </div>
 
       <div className="grid-row">
-        <input className="net-btn btn-put" type="button" value="📝 PUT DATA" onClick={handlePut} />
-        <input className="net-btn btn-del" type="button" value="🗑️ DELETE" onClick={handleDelete} />
+        <input className="net-btn btn-put" type="button" value="PUT DATA" onClick={handlePut} />
+        <input className="net-btn btn-del" type="button" value="DELETE" onClick={handleDelete} />
       </div>
     </div>
   );

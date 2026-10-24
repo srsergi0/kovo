@@ -124,7 +124,7 @@ export default function DemoPage() {
 
   return (
     <div ref={containerRef} className="page">
-      <text className="title">🚀 HOOKS & REFS DEMO</text>
+      <text className="title">HOOKS & REFS DEMO</text>
 
       <div className="counter-box">
         <text className="count-label">INLINED useCounter() HOOK</text>
@@ -134,7 +134,7 @@ export default function DemoPage() {
       <div className="btn-row">
         <input className="btn btn-danger" type="button" value="-1 DEC" onClick={dec} />
         <input className="btn btn-primary" type="button" value="+1 INC" onClick={inc} />
-        <input className="btn" type="button" value="🔄 RESET" onClick={reset} />
+        <input className="btn" type="button" value="⇄ RESET" onClick={reset} />
       </div>
 
       <input className="btn-back" type="button" value="← RETURN TO DASHBOARD" onClick={goBack} />

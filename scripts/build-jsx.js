@@ -1,34 +1,46 @@
 /**
  * Walks src-tsx/, runs the babel-plugin-vela-ux transform on every .tsx file,
  * resolves cross-file component dependencies, and writes .ux files to src/.
+ *
+ * .tsx/.jsx files without a default export (hook modules) are not compiled on
+ * their own: the compiler inlines them into the files that use them.
+ * Plain .ts/.js modules (helpers, constants) are emitted as .js next to the
+ * .ux files so their imports resolve.
  */
 
 const fs = require('fs');
 const path = require('path');
 
-const { buildUxContent } = require('./babel-plugin-vela-ux.js');
+const { buildUxContent, compileScriptModule } = require('./babel-plugin-vela-ux.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const SRC_TSX = path.join(ROOT, 'src-tsx');
 const SRC_OUT = path.join(ROOT, 'src');
 
+const SOURCE_RE = /\.(tsx|jsx|ts|js)$/i;
+const COMPILE_RE = /\.(tsx|jsx)$/i;
+const SCRIPT_RE = /^(?!.*\.d\.ts$).*\.(ts|js)$/i;
+
 // ---------------------------------------------------------------------------
 // Dependency resolution
 // ---------------------------------------------------------------------------
 
-function findImportedTsxFiles(filePath) {
+function resolveImport(fromFile, spec) {
+  const base = path.resolve(path.dirname(fromFile), spec);
+  const candidates = [base, ...['.tsx', '.ts', '.jsx', '.js'].map((e) => base + e),
+    ...['index.tsx', 'index.ts', 'index.jsx', 'index.js'].map((f) => path.join(base, f))];
+  return candidates.find((c) => SOURCE_RE.test(c) && fs.existsSync(c) && fs.statSync(c).isFile()) || null;
+}
+
+/** Relative source files imported by `filePath` (limited to `within` when given). */
+function findImportedFiles(filePath, within = SRC_TSX) {
   const source = fs.readFileSync(filePath, 'utf8');
   const results = [];
-  // Simple regex-based import scanner (same logic as the plugin but faster)
-  const importRe = /import\s+(?:\*\s+as\s+)?\w+\s+from\s+['"]([^'"]+)['"]/g;
+  const importRe = /(?:import|export)\s+(?:[\s\S]*?\s+from\s+)?['"](\.{1,2}\/[^'"]+)['"]/g;
   let match;
-  const dir = path.dirname(filePath);
   while ((match = importRe.exec(source)) !== null) {
-    const resolved = path.resolve(dir, match[1]);
-    // Only care about .tsx/.jsx files within src-tsx/
-    if (resolved.startsWith(SRC_TSX) && /\.(tsx|jsx)$/i.test(resolved)) {
-      results.push(resolved);
-    }
+    const resolved = resolveImport(filePath, match[1]);
+    if (resolved && (!within || resolved.startsWith(within))) results.push(resolved);
   }
   return results;
 }
@@ -38,7 +50,7 @@ function buildDependencyGraph(files) {
   const visited = {};
   const order = [];
 
-  for (const f of files) adj[f] = findImportedTsxFiles(f);
+  for (const f of files) adj[f] = findImportedFiles(f).filter((d) => COMPILE_RE.test(d));
 
   function dfs(file) {
     if (visited[file] === 1) return; // cycle guard
@@ -58,16 +70,40 @@ function buildDependencyGraph(files) {
   return order; // topological order: dependencies first
 }
 
+/**
+ * Files to recompile when `changed` is edited: itself (if compilable) plus
+ * every file that imports it directly or transitively. Inlined components
+ * and hooks are baked into their importers, so those must be rebuilt too.
+ */
+function findAffectedFiles(changed, sources = walk(SRC_TSX, [], SOURCE_RE)) {
+  const importers = new Map();
+  for (const f of sources) {
+    for (const dep of findImportedFiles(f, null)) {
+      if (!importers.has(dep)) importers.set(dep, new Set());
+      importers.get(dep).add(f);
+    }
+  }
+  const affected = new Set();
+  const queue = [changed];
+  while (queue.length) {
+    const f = queue.shift();
+    if (affected.has(f)) continue;
+    affected.add(f);
+    for (const imp of importers.get(f) || []) queue.push(imp);
+  }
+  return [...affected].filter((f) => (COMPILE_RE.test(f) || SCRIPT_RE.test(f)) && fs.existsSync(f));
+}
+
 // ---------------------------------------------------------------------------
 // File walker
 // ---------------------------------------------------------------------------
 
-function walk(dir, files = []) {
+function walk(dir, files = [], pattern = COMPILE_RE) {
   if (!fs.existsSync(dir)) return files;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full, files);
-    else if (entry.isFile() && /\.(tsx|jsx)$/.test(entry.name)) files.push(full);
+    if (entry.isDirectory()) walk(full, files, pattern);
+    else if (entry.isFile() && pattern.test(entry.name)) files.push(full);
   }
   return files;
 }
@@ -76,15 +112,37 @@ function walk(dir, files = []) {
 // Transform a single file
 // ---------------------------------------------------------------------------
 
+function isCompilable(source) {
+  return /export\s+default\b/.test(source);
+}
+
 function transformFile(filePath) {
   const source = fs.readFileSync(filePath, 'utf8');
   const rel = path.relative(SRC_TSX, filePath);
-  const outPath = path.join(SRC_OUT, rel.replace(/\.tsx?$/, '.ux'));
+  if (SCRIPT_RE.test(filePath)) {
+    const exported = [...source.matchAll(/export\s+(?:default\s+)?(?:async\s+)?(?:function\*?|const|let|var|class)\s+([\w$]+)/g)]
+      .map((m) => m[1]);
+    if (exported.length && exported.every((n) => /^use[A-Z]/.test(n))) {
+      console.log(`  ${rel}  (hook module: inlined where it is used)`);
+      return false;
+    }
+    const outPath = path.join(SRC_OUT, rel.replace(/\.ts$/i, '.js'));
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, compileScriptModule(source, filePath) + '\n', 'utf8');
+    console.log(`  ${rel}  ->  ${path.relative(ROOT, outPath)}`);
+    return true;
+  }
+  if (!isCompilable(source)) {
+    console.log(`  ${rel}  (no default export: inlined where it is used)`);
+    return false;
+  }
+  const outPath = path.join(SRC_OUT, rel.replace(/\.(t|j)sx?$/, '.ux'));
   const { content, warnings } = buildUxContent(source, filePath);
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, content, 'utf8');
   for (const w of warnings) console.warn(`[kovo] ${rel}: ${w}`);
   console.log(`  ${rel}  ->  ${path.relative(ROOT, outPath)}`);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +170,7 @@ function main() {
   }
 
   console.log('\nTransforming...');
+  for (const f of walk(SRC_TSX, [], SCRIPT_RE)) transformFile(f);
   for (const f of buildOrder) transformFile(f);
 
   console.log('\nDone.');
@@ -121,6 +180,8 @@ module.exports = {
   transformFile,
   walk,
   buildDependencyGraph,
+  findImportedFiles,
+  findAffectedFiles,
   main,
   SRC_TSX,
   SRC_OUT,

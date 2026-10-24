@@ -104,7 +104,7 @@ export default function MyPage() {
   return (
     <div className="page">
       <text className="title">Count: {count}</text>
-      <input className="btn" type="button" value="⚡ +1" onClick={increment} />
+      <input className="btn" type="button" value="+1" onClick={increment} />
     </div>
   );
 }

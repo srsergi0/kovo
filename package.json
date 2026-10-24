@@ -35,10 +35,11 @@
     "build:copy": "node scripts/copy-static.js",
     "build:jsx": "node scripts/build-jsx.js",
     "build": "bun run build:copy && bun run build:jsx",
-    "aiot:build": "bun run build && aiot build --enable-custom-component",
+    "aiot:build": "bun run build && aiot build --complete-feature",
     "preview": "node scripts/preview.js",
     "clean": "node -e \"require('fs').rmSync('src',{recursive:true,force:true})\"",
-    "sync:templates": "node scripts/sync-templates.js"
+    "sync:templates": "node scripts/sync-templates.js",
+    "release": "node scripts/release.js"
   },
   "devDependencies": {
     "@aiot-toolkit/velasim": "^0.1.26",

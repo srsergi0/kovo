@@ -107,7 +107,7 @@ async function main() {
   try {
     // Run aiot build to get initial RPK
     const aiotBin = require.resolve('aiot-toolkit/lib/bin.js', { paths: [ROOT] });
-    execSync(`"${process.execPath}" "${aiotBin}" build --enable-custom-component`, {
+    execSync(`"${process.execPath}" "${aiotBin}" build --complete-feature`, {
       cwd: ROOT,
       stdio: 'inherit',
     });

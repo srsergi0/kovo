@@ -21,6 +21,7 @@ const SHARED_FILES = [
   'scripts/copy-static.js',
   'scripts/dev.js',
   'scripts/dev-emulator.js',
+  'scripts/release.js',
   'types/kovo.d.ts',
 ];
 

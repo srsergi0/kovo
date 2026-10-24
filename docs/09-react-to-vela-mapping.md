@@ -91,7 +91,42 @@ Use `export const styleLang = 'less'` (or `'scss'`) to emit `<style lang="...">`
 
 ---
 
-## ⚠️ 4. Behaviour differences from React
+## ⚙️ 4. Vela optimization guide, applied automatically
+
+Watches have little memory; Vela closes apps that use too much of it. Kovo applies the official recommendations (`guide/best-practice/memory`, `guide/best-practice/start`, `guide/other/tips`) at compile time:
+
+| Guide recommendation | What Kovo does |
+| :--- | :--- |
+| Keep non-UI data out of the ViewModel | Constants the template does not read stay module-level. **Component** state that the template, computed values and watched deps never read becomes a plain field (`this.x`, no observers). **Page** state like that triggers a warning instead, because it may receive a router param: use `useRef()` for it. |
+| Update objects in place instead of reassigning | `setList([...list, x])` → `this.list.push(x)`, `setList([x, ...list])` → `this.list.unshift(x)` |
+| Mark data that never changes as `static` | Nodes whose bindings only read constants (or items of a constant list) get the `static` attribute |
+| Clear timers on destroy | Effect cleanups run in `onDestroy`; a `setInterval` inside an effect without a cleanup warns |
+| Remove unused CSS | Rules for classes the template never uses are dropped (inlined components bring their whole stylesheet). Skipped when a class name is only known at runtime |
+| Avoid custom components on watches | Stateless components are inlined |
+| `image` `src` must be one binding | `` src={`/img/${x}.png`} `` → `src="{{'/img/' + x + '.png'}}"` |
+| Minimize logs, use PNG8, declare features | `bun run release` builds with `--drop-console log,info,debug --enable-image-png8 --complete-feature`; `aiot:build` uses `--complete-feature` so a missing `system.*` feature cannot break calls |
+
+Opt out per build with the options `{ autoStatic: false, trimData: false, inPlaceUpdates: false, pruneCss: false }`.
+
+### Release builds
+
+`bun run release` produces `dist/<package>.release.<version>.rpk`. It must be signed with **your** key in `./sign` (`private.pem` + `certificate.pem`, ignored by git). Create it once and back it up — updates must use the same key:
+
+```bash
+mkdir sign && cd sign
+openssl req -newkey rsa:2048 -nodes -keyout private.pem -x509 -days 3650 -out certificate.pem
+```
+
+### Still up to you
+
+- Paginate lists longer than ~10–20 items; lazy-load swiper images.
+- Store only the fields you need from network responses, not whole payloads.
+- Avoid `setTimeout` before the first navigation and HTTP requests on the logo page (first paint must be ≤ 2 s).
+- Prefer images already sized for the screen (≤ 200 KB) and fewer `border-radius` on images.
+
+---
+
+## ⚠️ 5. Behaviour differences from React
 
 - **The dev watcher rebuilds importers.** Inlined components and hooks are baked into the files that use them, so `bun run dev` recompiles every importer when one of them changes. `.tsx` files without a default export (hook/helper modules) are not compiled on their own.
 - **No re-render cycle.** A component body runs once at compile time. `useEffect` without a dependency array runs once (Kovo warns). Use `[deps]` to re-run through `$watch`.

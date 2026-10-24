@@ -148,7 +148,7 @@ export default function HelloPage() {
 
 ## 🧪 Step 4: Running Unit Tests
 
-Kovo comes with an extensive compiler test suite (`230+` pass cases). Run tests anytime with:
+Kovo comes with an extensive compiler test suite (`250+` pass cases). Run tests anytime with:
 
 ```bash
 bun test

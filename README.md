@@ -46,7 +46,7 @@ bun run dev:emulator
 - 🔄 **Zero-runtime overhead** — All hooks are inlined at compile time into native QuickApp VM objects
 - 🎨 **OLED-optimized design** — 466x466 dark mode UI with vibrant neon accents out of the box
 - 📡 **Network integration** — `@system.fetch` support with GET/POST/PUT/DELETE
-- 🧪 **230+ automated tests** — Comprehensive compiler test suite
+- 🧪 **250+ automated tests** — Comprehensive compiler test suite
 - ⌚ **Zero-config emulator** — Auto-detects, patches, and launches Vela Virtual Devices
 - 📱 **QR deploy to real watches** — Push apps to physical Xiaomi smartwatches via Bluetooth
 
@@ -67,8 +67,9 @@ bun run dev:emulator
 ```bash
 bun run dev:emulator     # Launch live hot-reloading emulator
 bun run build            # Transpile TSX → .ux files
-bun run aiot:build       # Build signed .rpk binary
-bun run test             # Run 230+ compiler tests
+bun run aiot:build       # Build debug .rpk
+bun run release          # Optimized, signed release .rpk (needs a ./sign key)
+bun run test             # Run 250+ compiler tests
 ```
 
 ---

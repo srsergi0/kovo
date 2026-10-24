@@ -6,7 +6,7 @@ This document covers the **Kovo automated test suite**, the **zero-config emulat
 
 ## 🧪 1. Compiler Unit Test Suite
 
-Kovo ships with **230+ automated tests** across four test files that exhaustively validate every compiler transformation, edge case, and error path.
+Kovo ships with **250+ automated tests** across five test files that exhaustively validate every compiler transformation, edge case, and error path.
 
 ### Running Tests
 
@@ -126,7 +126,8 @@ bun run dev:emulator
     "build": "bun run build:copy && bun run build:jsx",
     "build:copy": "node scripts/copy-static.js",
     "build:jsx": "node scripts/build-jsx.js",
-    "aiot:build": "bun run build && aiot build --enable-custom-component",
+    "aiot:build": "bun run build && aiot build --complete-feature",
+    "release": "node scripts/release.js",
     "dev": "node scripts/dev.js",
     "dev:emulator": "node scripts/dev-emulator.js"
   }

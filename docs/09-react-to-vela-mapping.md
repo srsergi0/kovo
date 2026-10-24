@@ -1,0 +1,89 @@
+# 09. React → Vela Mapping & Platform Limits
+
+Kovo compiles React-style components onto **native Vela ViewModel features**. This page lists every mapping the compiler performs and the Vela limits it enforces. The limits come from the official Vela JS docs (`guide/framework/*`, `components/general/style`, `guide/best-practice/memory`).
+
+---
+
+## 🧠 1. Script mapping
+
+| You write (TSX) | Kovo emits (`.ux`) |
+| :--- | :--- |
+| `const [x, setX] = useState(1)` in a **page** | `protected: { x: 1 }` (in-app router params can override it) |
+| `const [x, setX] = useState(1)` in a **component** | `data: { x: 1 }` |
+| `useState(prop)` / any non-constant initial value | `x: null` + `onInit() { this.x = this.prop }` |
+| `setX(v)` (anywhere: callbacks, expressions, `function(){}`) | `this.x = v` |
+| `setX(prev => prev + 1)` | `this.x = this.x + 1` |
+| `setX(prev => { ... })` | `this.x = (prev => { ... })(this.x)` |
+| `setX` passed as a value | `v => this.x = typeof v === "function" ? v(this.x) : v` |
+| `const total = a + b` (reads state/props) | `computed: { total() { return this.a + this.b } }` |
+| `useMemo(() => ..., deps)` | `computed` |
+| `useCallback(fn, deps)` | method |
+| `function f() {}` / `const f = () => {}` | method (`f() { ... }`) |
+| constant read by the template | `data` / `protected` entry |
+| constant not read by the template | module-level `const` (not in the ViewModel) |
+| module helper read by the template (`{fmt(x)}`) | bridged as a method (`fmt,`) |
+| `useRef()` attached with `ref={r}` | `id="r"`, `r.current` → `this.$element('r')` (uses an explicit `id` if present) |
+| `useRef(0)` not attached to JSX | plain field: `this.r = { current: 0 }` in `onInit` |
+| `useEffect(fn, [])` | body inlined in `onInit` (or `onReady` when it touches a DOM ref) |
+| `useEffect(fn, [a, obj.b])` | `kovoEffectN()` + `this.$watch('a', 'kovoEffectN')` |
+| `useEffect(() => { ...; return cleanup })` | cleanup runs before re-runs and in `onDestroy` |
+| child prop `onSelect` + `onSelect(a, b)` | `this.$emit('select', { kovoArgs: [a, b] })` |
+| parent `<Child onSelect={fn} />` | `@select="kovoHandlerN"` → `fn(...kovoArgs(evt))` |
+| custom hook `useX()` (same file) | inlined; params substituted, `const { a: b } = useX()` renames |
+| TypeScript props `({ title }: { title: string })` | `props: { title: { type: String } }` |
+
+Rewriting is **scope-aware** (Babel bindings): parameters, local variables, object keys and strings that share a name with state are never touched. Inside nested `function () {}` callbacks Kovo uses a `const kovoSelf = this` alias.
+
+---
+
+## 🧩 2. Template mapping
+
+| You write (TSX) | Kovo emits |
+| :--- | :--- |
+| `cond && <X/>` | `<X if="{{cond}}"/>` |
+| `a ? <X/> : b ? <Y/> : <Z/>` | `if` / `elif` / `else` siblings |
+| `list.map(i => <X key={i.id}/>)` | `<X for="{{i in list}}" tid="id"/>` |
+| `list.map(({ id, name }) => ...)` | `for="{{kovoItem in list}}"`, `kovoItem.name` |
+| `list.map(i => i.ok && <X/>)` | `<block for>` + `<X if>` (Vela evaluates `if` before `for` on one tag) |
+| `cond && list.map(...)` | `<block if>` around the loop |
+| `list.filter(f).map(...)` | the filter moves to a generated computed (`kovoComputedN`) |
+| nested `<>...</>` | `<block>` (no extra node) — the root fragment still becomes `<div>` |
+| `` {`Hi ${name}`} `` / `` className={`a ${b}`} `` | `Hi {{name}}` / `class="a {{b}}"` |
+| `onClick={() => { a(); b(); }}` | generated method `kovoHandlerN`, loop variables passed as arguments |
+| `onChange={(e) => save(e)}` | `@change="save"` (Vela appends the event object) |
+| `<StatelessCard title="x" />` | **inlined** at compile time (see below) |
+
+### Compile-time component inlining
+
+Vela docs advise against custom components on watches because each one gets its own ViewModel. When an imported component is **stateless** (only props, derived constants and JSX, no hooks or functions, no nested custom components) Kovo copies its template into the parent with the props substituted and merges its `style`. No `<import>` and no extra ViewModel are produced.
+
+Opt out per component with `export const inline = false;`, or for a whole build with the option `{ inline: false }`.
+
+Stateful components keep the normal `<import name="..." src="....ux">` path.
+
+---
+
+## 🚫 3. Vela limits Kovo enforces
+
+| Limit (official docs) | What Kovo does |
+| :--- | :--- |
+| Data/computed names cannot start with `$` or `_`; `for`, `if`, `show`, `tid` are reserved | compile error |
+| `for` loop variables cannot start with `$` or `_` | compile error |
+| `tid` only accepts a property name of the item | `key={item.prop}` → `tid="prop"`; anything else warns and falls back to the index |
+| Templates cannot contain functions | hoisted to a computed, or a warning inside loops |
+| Only `.class`, `#id`, `tag` and `,` selectors | warning for descendant, child, sibling, pseudo, attribute, `*` and `.a.b` selectors |
+| `display` only supports `flex` and `none` | warning |
+| No `<slot>` is documented | warning when children are passed to a component |
+| Early `return` in a component | compile error — use a ternary in the returned JSX |
+| Imported hooks | warning — only same-file hooks are inlined |
+
+Use `export const styleLang = 'less'` (or `'scss'`) to emit `<style lang="...">`; the CSS lint is skipped for preprocessed styles.
+
+---
+
+## ⚠️ 4. Behaviour differences from React
+
+- **No re-render cycle.** A component body runs once at compile time. `useEffect` without a dependency array runs once (Kovo warns). Use `[deps]` to re-run through `$watch`.
+- **Only state, props and computed values can be watched.** Other dependencies are ignored with a warning.
+- **Event payloads.** Kovo children send `{ kovoArgs: [...] }`. Hand-written `.ux` children that `$emit('x', payload)` still work: the parent receives `payload` as its single argument.
+- **Pages have no props.** Router params arrive as page state (`protected`).

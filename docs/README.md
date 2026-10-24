@@ -20,8 +20,9 @@
 | [04. State & Hooks](./04-state-and-hooks.md) | **State Management** | `useState`, `useRef`, auto-registration of top-level component variables, and custom hook composition. |
 | [05. Styling & Design System](./05-styling-and-design-system.md) | **Smartwatch OLED Design** | 466x466 OLED dark mode aesthetics, pill buttons, stat cards, progress bars, and CSS extraction rules. |
 | [06. System APIs & Networking](./06-system-apis-and-networking.md) | **Device APIs & Network** | Navigation (`@system.router`), haptics (`@system.vibrator`), HTTP requests (`@system.fetch`), and permissions manifest. |
-| [07. Testing & CLI Tools](./07-testing-and-cli-tools.md) | **Test Suite & Hardware Deployment** | Running `bun test` (168+ edge case tests), zero-config emulator auto-patching, and QR code deployment to physical watches. |
+| [07. Testing & CLI Tools](./07-testing-and-cli-tools.md) | **Test Suite & Hardware Deployment** | Running `bun run test` (230+ edge case tests), zero-config emulator auto-patching, and QR code deployment to physical watches. |
 | [08. API Reference & Cheatsheet](./08-api-reference-and-cheatsheet.md) | **Reference & Troubleshooting** | Complete API cheat sheet, compiler flags, and solutions to common pitfalls (`need a array`, VM method binding, CDP debugger panics). |
+| [09. React → Vela Mapping & Limits](./09-react-to-vela-mapping.md) | **Compiler Semantics** | How hooks, effects, events and JSX map onto native Vela features, compile-time component inlining, and the platform limits Kovo enforces. |
 
 ---
 
@@ -32,7 +33,7 @@
 - 🛡️ **Xiaomi Vela OS VM Compliant**: Generates top-level method bindings on `export default` for 100% native execution speed.
 - 🎨 **466x466 OLED Dark Mode System**: Beautiful glowing neon pill buttons, stat cards, and status bars out of the box.
 - 📡 **Robust Network Integration**: Safe `@system.fetch` integration with support for GET, POST (JSON), PUT, and DELETE methods.
-- 🧪 **Ultra-Robust Test Suite**: Covered by 168+ automated unit and integration tests (`bun test`).
+- 🧪 **Ultra-Robust Test Suite**: Covered by 230+ automated unit and integration tests (`bun run test`).
 - ⌚ **Zero-Config Emulator & QR Hardware Deploy**: Automatically launches Redmi Watch / Xiaomi Watch S4 emulators and generates instant QR codes for physical watches.
 
 ---
@@ -52,6 +53,6 @@ bun run dev:emulator
 # 4. Build native signed .rpk binary for production
 bun run aiot:build
 
-# 5. Run full compiler unit test suite (168+ tests)
+# 5. Run full compiler unit test suite (230+ tests)
 bun test
 ```

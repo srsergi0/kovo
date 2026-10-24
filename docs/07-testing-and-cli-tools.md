@@ -6,7 +6,7 @@ This document covers the **Kovo automated test suite**, the **zero-config emulat
 
 ## 🧪 1. Compiler Unit Test Suite
 
-Kovo ships with **168+ automated tests** across two test files that exhaustively validate every compiler transformation, edge case, and error path.
+Kovo ships with **230+ automated tests** across four test files that exhaustively validate every compiler transformation, edge case, and error path.
 
 ### Running Tests
 

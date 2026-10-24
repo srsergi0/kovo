@@ -46,7 +46,7 @@ bun run dev:emulator
 - 🔄 **Zero-runtime overhead** — All hooks are inlined at compile time into native QuickApp VM objects
 - 🎨 **OLED-optimized design** — 466x466 dark mode UI with vibrant neon accents out of the box
 - 📡 **Network integration** — `@system.fetch` support with GET/POST/PUT/DELETE
-- 🧪 **168+ automated tests** — Comprehensive compiler test suite
+- 🧪 **230+ automated tests** — Comprehensive compiler test suite
 - ⌚ **Zero-config emulator** — Auto-detects, patches, and launches Vela Virtual Devices
 - 📱 **QR deploy to real watches** — Push apps to physical Xiaomi smartwatches via Bluetooth
 
@@ -68,7 +68,7 @@ bun run dev:emulator
 bun run dev:emulator     # Launch live hot-reloading emulator
 bun run build            # Transpile TSX → .ux files
 bun run aiot:build       # Build signed .rpk binary
-bun test                 # Run 168+ compiler tests
+bun run test             # Run 230+ compiler tests
 ```
 
 ---
@@ -110,7 +110,7 @@ export default function MyPage() {
 }
 ```
 
-This compiles to a native `.ux` file with `data: { count: 0 }` and top-level methods — zero runtime overhead!
+This compiles to a native `.ux` file with `protected: { count: 0 }` (page state) and top-level methods — zero runtime overhead!
 
 ---
 
@@ -126,6 +126,7 @@ See the full documentation in [`docs/`](./docs/README.md):
 - [System APIs & Networking](./docs/06-system-apis-and-networking.md)
 - [Testing & CLI Tools](./docs/07-testing-and-cli-tools.md)
 - [API Reference & Cheatsheet](./docs/08-api-reference-and-cheatsheet.md)
+- [React → Vela Mapping & Limits](./docs/09-react-to-vela-mapping.md)
 
 ---
 

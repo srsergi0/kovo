@@ -14,7 +14,7 @@ const [stateName, setStateName] = useState(initialValue);
 
 ### Compiler Inlining Mechanics
 
-1. **State Registration**: `initialValue` is assigned to `data: { stateName: initialValue }` on the QuickApp VM object.
+1. **State Registration**: `initialValue` is assigned to `protected: { stateName: initialValue }` in pages and `data: { stateName: initialValue }` in components. Non-constant initial values (e.g. a prop) are assigned in `onInit`.
 2. **Setter Inlining**: Invoking `setStateName(newValue)` inside a component function or hook is transpiled to `this.stateName = newValue`.
 3. **Binary Calculations**: `setStateName(stateName + 500)` transpiles to `this.stateName = this.stateName + 500`.
 
@@ -46,7 +46,7 @@ export default function Counter() {
 ##### Output QuickApp `.ux` Script:
 ```javascript
 export default {
-  data: { steps: 8450 },
+  protected: { steps: 8450 },
   add500() {
     this.steps = this.steps + 500;
   },

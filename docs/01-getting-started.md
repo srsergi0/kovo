@@ -141,14 +141,14 @@ export default function HelloPage() {
 
 1. `scripts/copy-static.js` detects `hello.tsx` and automatically registers `"pages/hello": { "component": "hello" }` inside `src/manifest.json`.
 2. `scripts/babel-plugin-vela-ux.js` converts `HelloPage` into `src/pages/hello/hello.ux`.
-3. `increment()` is bound to `export default { data: { count: 0 }, increment() { this.count = this.count + 1; } }`.
+3. `increment()` is bound to `export default { protected: { count: 0 }, increment() { this.count = this.count + 1; } }`.
 4. `bun run dev:emulator` hot-reloads the app on the watch!
 
 ---
 
 ## 🧪 Step 4: Running Unit Tests
 
-Kovo comes with an extensive compiler test suite (`168+` pass cases). Run tests anytime with:
+Kovo comes with an extensive compiler test suite (`230+` pass cases). Run tests anytime with:
 
 ```bash
 bun test

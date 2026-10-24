@@ -1367,7 +1367,7 @@ describe('CRUEL: fragment madness', () => {
       };
     `;
     const { content } = transform(src);
-    assert.match(content, /<div><\/div>/);
+    assert.match(content, /<div\/>/);
   });
 
   test('fragment with single element', () => {
@@ -1387,9 +1387,10 @@ describe('CRUEL: fragment madness', () => {
       };
     `;
     const { content } = transform(src);
-    // Both fragments wrap in div
+    // Root fragment becomes <div>; nested fragments become transparent <block>
     const divCount = (content.match(/<div>/g) || []).length;
-    assert.equal(divCount, 2);
+    assert.equal(divCount, 1);
+    assert.match(content, /<block>/);
     assert.match(content, /<text>nested<\/text>/);
   });
 });
@@ -1705,10 +1706,10 @@ describe('CRUEL: import edge cases', () => {
     assert.match(content, /<import name="my-comp"/);
     assert.match(content, /<my-comp title="hi"/);
     assert.match(content, /@event="handler"/);
-    // Script preserves all 3 imports
+    // Script keeps JS imports; the component import lives in <import> only
     assert.match(content, /import router from/);
     assert.match(content, /import fetch from/);
-    assert.match(content, /import MyComp from/);
+    assert.doesNotMatch(content, /import MyComp from/);
   });
 });
 
@@ -1732,7 +1733,9 @@ describe('React Functional Components', () => {
     assert.match(content, /<div @click="handleInc">/);
     assert.match(content, /<text>\{\{label\}\}: \{\{count\}\}<\/text>/);
     assert.match(content, /props:\s*\{\s*value:\s*\{\s*default:\s*0\s*\},\s*label:\s*\{\s*default:\s*'Count'\s*\}\s*\}/);
-    assert.match(content, /data:\s*\{\s*count:\s*value\s*\}/);
+    // State initialised from a prop: declared in data, assigned in onInit
+    assert.match(content, /data:\s*\{\s*count:\s*null\s*\}/);
+    assert.match(content, /onInit\(\)\s*\{\s*this\.count = this\.value;/);
     assert.match(content, /handleInc\(\)/);
     assert.match(content, /this\.count = this\.count \+ 1/);
   });
@@ -1764,7 +1767,8 @@ describe('React Functional Components', () => {
       }
     `;
     const { content } = transform(src);
-    assert.match(content, /data:\s*\{\s*count:\s*10\s*\}/);
+    // Pages use `protected` so in-app router params can override state
+    assert.match(content, /protected:\s*\{\s*count:\s*10\s*\}/);
     assert.match(content, /inc\(\)/);
     assert.match(content, /this\.count = this\.count \+ 1/);
     assert.match(content, /dec\(\)/);
@@ -1829,14 +1833,14 @@ describe('React Functional Components', () => {
     // 3. Methods: inputRef.current.focus() -> this.$element("inputRef").focus()
     assert.match(content, /focusInput\(\) \{\s*this\.\$element\(["']inputRef["']\)\.focus\(\);\s*\}/);
 
-    // 4. Methods: canvasRef.current.getContext('2d') -> this.$element("canvasRef").getContext('2d')
-    assert.match(content, /clearCanvas\(\) \{\s*const ctx = this\.\$element\(["']canvasRef["']\)\.getContext\('2d'\);\s*ctx\.clearRect\(0, 0, 300, 300\);\s*\}/);
+    // 4. Methods: canvasRef.current resolves to the element's explicit id
+    assert.match(content, /clearCanvas\(\) \{\s*const ctx = this\.\$element\(["']customCanvasId["']\)\.getContext\('2d'\);\s*ctx\.clearRect\(0, 0, 300, 300\);\s*\}/);
 
     // 5. Custom hook inlined ref: listRef.current.scrollTo(...) -> this.$element("listRef").scrollTo(...)
     assert.match(content, /scrollTop\(\) \{\s*this\.\$element\(["']listRef["']\)\.scrollTo\(\{/);
 
     // 6. Data: title initialized
-    assert.match(content, /data:\s*\{\s*title:\s*'My Canvas'\s*\}/);
+    assert.match(content, /protected:\s*\{\s*title:\s*'My Canvas'\s*\}/);
   });
 
   test('dynamic component tag <component is={activeTab} /> is serialized to is="{{activeTab}}"', () => {
@@ -1878,7 +1882,7 @@ describe('React Functional Components', () => {
     const { content } = transform(src);
 
     // 1. Methods MUST be top-level keys of export default (bump() { ... })
-    assert.match(content, /export default \{\s*data:\s*\{\s*counter:\s*100\s*\},\s*bump\(\)\s*\{/);
+    assert.match(content, /export default \{\s*protected:\s*\{\s*counter:\s*100\s*\},\s*bump\(\)\s*\{/);
 
     // 2. MUST NOT contain methods: {
     assert.doesNotMatch(content, /methods:\s*\{/);

@@ -135,7 +135,7 @@ The compiler identifies relative capital-cased default imports (`/^[A-Z]/`) and 
 
 ### 5. Top-Level Local Variable Auto-Registration
 
-Local variables declared inside functional components (such as constant arrays or data models) are automatically added to `data: { ... }` so QuickApp template directives (`for="{{w in workouts}}"`) can resolve them reactively:
+Local constants declared inside functional components that the **template reads** (such as constant arrays) are added to the data model (`protected` in pages, `data` in components) so template directives (`for="{{w in workouts}}"`) can resolve them. Constants the template does not read stay module-level, and values derived from state or props become `computed` (see [09. React → Vela Mapping](./09-react-to-vela-mapping.md)):
 
 #### Input TSX:
 ```tsx
@@ -148,7 +148,7 @@ export default function WorkoutsPage() {
 #### Output `.ux`:
 ```javascript
 export default {
-  data: { workouts: WORKOUTS }
+  protected: { workouts: WORKOUTS }
 }
 ```
 This eliminates `[ERROR] [AIOTJS] [JsForCallRender] need a array` errors during template rendering.

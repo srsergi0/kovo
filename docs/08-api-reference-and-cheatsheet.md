@@ -49,7 +49,7 @@ Declares a reactive state variable on the QuickApp VM's `data` object.
 | **Returns** | `[value, setter]` | Destructured array: current value and setter function |
 
 **Compile-time behavior:**
-- `const [x, setX] = useState(42)` → `data: { x: 42 }`
+- `const [x, setX] = useState(42)` → `protected: { x: 42 }` (page) / `data: { x: 42 }` (component)
 - `setX(newVal)` → `this.x = newVal`
 - `setX(x + 1)` → `this.x = this.x + 1`
 

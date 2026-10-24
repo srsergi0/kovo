@@ -4,37 +4,31 @@
  * Transforms TSX files written in React-style JSX into Xiaomi Vela .ux files
  * (template + style + script blocks).
  *
- *   export default {
- *     data: { ... },
- *     methods: { ... },
- *     style: `.foo { color: red }`,
- *     template: (
- *       <div className="x" onClick={this.fn} if={this.visible}>
- *         <text>{this.title}</text>
- *         {this.items.map(item => <image src={item.src} />)}
- *       </div>
- *     ),
+ * Two input styles are supported:
+ *
+ * 1. React-style function components (recommended):
+ *
+ *   export default function Counter({ step = 1 }) {
+ *     const [count, setCount] = useState(0);
+ *     const doubled = count * 2;                 // -> computed
+ *     useEffect(() => {                          // -> onInit / $watch / onDestroy
+ *       const id = setInterval(tick, 1000);
+ *       return () => clearInterval(id);
+ *     }, []);
+ *     function tick() { setCount((c) => c + step); }
+ *     return <text>{count} / {doubled}</text>;
  *   }
  *
- *   =>
+ * 2. Vela-style object components (export default { data, template, ... }).
  *
- *   <template>
- *     <div class="x" @click="fn" if="{{visible}}">
- *       <text>{{title}}</text>
- *       <image for="{{item in items}}" src="{{item.src}}" />
- *     </div>
- *   </template>
- *   <style>
- *     .foo { color: red }
- *   </style>
- *   <script>
- *     export default {
- *       data: { ... },
- *       methods: { ... },
- *     }
- *   </script>
+ * The compiler maps React concepts onto native Vela ViewModel features
+ * (data / protected, computed, $watch, $emit, $element, lifecycles) so the
+ * output runs with zero runtime overhead. References to component members are
+ * rewritten with Babel scope analysis, never with text replacement.
  */
 
+const fs = require('fs');
+const path = require('path');
 const parser = require('@babel/parser');
 const traverse = require('@babel/traverse').default;
 const generator = require('@babel/generator').default;
@@ -71,15 +65,69 @@ const EVENT_MAP = {
   onkey: 'key',
 };
 
-// Component registry: populated by buildUxContent during import-collection pass
-let _componentRegistry = null;
-
 const CONTAINER_LIKE = new Set([
   'div', 'stack', 'list', 'list-item', 'scroll', 'swiper',
-  'image-animator', 'marquee',
+  'image-animator', 'marquee', 'block',
 ]);
 
 const TEXT_LIKE = new Set(['text', 'span']);
+
+// Names Vela reserves in data / computed (see guide/framework/script/page-data).
+const RESERVED_NAMES = new Set(['for', 'if', 'elif', 'else', 'show', 'tid']);
+
+const KOVO_MODULES = new Set(['kovo-ux', 'kovo', 'vela-jsx', 'react']);
+
+const KNOWN_HOOKS = new Set([
+  'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', 'useCallback',
+]);
+
+// Identifiers a template binding may use without them living on the ViewModel.
+const TEMPLATE_GLOBALS = new Set([
+  'undefined', 'NaN', 'Infinity', 'Math', 'JSON', 'String', 'Number', 'Boolean',
+  'Array', 'Object', 'Date', 'parseInt', 'parseFloat', 'isNaN',
+]);
+
+const KOVO_ARGS_HELPER =
+  'function kovoArgs(evt) {\n' +
+  '  var d = evt && evt.detail;\n' +
+  '  return d && d.kovoArgs ? d.kovoArgs : [d];\n' +
+  '}';
+
+// -----------------------------------------------------------------------------
+// Compilation context
+// -----------------------------------------------------------------------------
+
+function createContext(filename, options) {
+  return {
+    filename,
+    options,
+    warnings: [],
+    warn(msg) {
+      if (!this.warnings.includes(msg)) this.warnings.push(msg);
+    },
+    componentRegistry: new Map(),
+    templateImports: [],
+    usedComponents: new Set(),
+    inlineCache: new Map(),
+    inlineStyles: [],
+    inlinedComponents: new Set(),
+    moduleBindings: new Map(),
+    usesKovoArgs: false,
+    // Function component model while its template is being serialized.
+    component: null,
+    // Stack of active `.map()` loops: { item, index, names: Set }.
+    loops: [],
+  };
+}
+
+function loopVarNames(ctx) {
+  const names = [];
+  for (const loop of ctx.loops) {
+    if (loop.index) names.push(loop.index);
+    names.push(loop.item);
+  }
+  return names;
+}
 
 // -----------------------------------------------------------------------------
 // Utility helpers
@@ -94,12 +142,16 @@ function dropThis(src) {
   return src.replace(/\bthis\./g, '');
 }
 
-function exprToVelaBinding(node) {
-  return dropThis(exprSource(node));
-}
-
 function camelToKebab(s) {
   return s.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
+}
+
+function pascalToKebab(s) {
+  return camelToKebab(s).replace(/^-/, '');
+}
+
+function lowerFirst(s) {
+  return s.charAt(0).toLowerCase() + s.slice(1);
 }
 
 function escapeXml(s) {
@@ -122,49 +174,399 @@ function getElementName(node) {
   return '?';
 }
 
-function isCustomComponent(name) {
-  if (_componentRegistry && _componentRegistry.has(name)) return true;
+function isCustomComponent(name, ctx) {
+  if (ctx.componentRegistry.has(name)) return true;
   return /^[A-Z]/.test(name) || name.includes('.') || name.includes(':');
+}
+
+function propKeyName(key) {
+  if (t.isIdentifier(key)) return key.name;
+  if (t.isStringLiteral(key) || t.isNumericLiteral(key)) return String(key.value);
+  return null;
+}
+
+function unwrapParens(node) {
+  while (node && (t.isParenthesizedExpression(node) || t.isTSAsExpression(node))) {
+    node = node.expression;
+  }
+  return node;
+}
+
+function isFunctionNode(node) {
+  return t.isArrowFunctionExpression(node) || t.isFunctionExpression(node);
+}
+
+function calleeName(call) {
+  if (!t.isCallExpression(call)) return '';
+  const c = call.callee;
+  if (t.isIdentifier(c)) return c.name;
+  if (t.isMemberExpression(c) && t.isIdentifier(c.property)) return c.property.name;
+  return '';
+}
+
+function cssFromNode(node) {
+  if (t.isStringLiteral(node)) return node.value;
+  if (t.isTemplateLiteral(node)) return node.quasis.map((q) => q.value.cooked).join('');
+  return null;
+}
+
+/**
+ * Post-order rewrite of a detached AST. `visit(node, parent, key)` returns a
+ * replacement node or undefined. Used for template-only substitutions where
+ * Babel scope tracking is not needed (JSX bindings cannot declare variables).
+ */
+function rewriteTree(node, visit, parent = null, key = null) {
+  if (!node || typeof node.type !== 'string') return node;
+  for (const k of t.VISITOR_KEYS[node.type] || []) {
+    const child = node[k];
+    if (Array.isArray(child)) {
+      for (let i = 0; i < child.length; i++) child[i] = rewriteTree(child[i], visit, node, k);
+    } else if (child) {
+      node[k] = rewriteTree(child, visit, node, k);
+    }
+  }
+  const replacement = visit(node, parent, key);
+  return replacement === undefined ? node : replacement;
+}
+
+/** Names of identifiers read by `node` (approximate: ignores shadowing). */
+function referencedNames(node) {
+  const names = new Set();
+  (function walk(n, parent, grandparent) {
+    if (!n || typeof n.type !== 'string') return;
+    if (t.isIdentifier(n) && (!parent || t.isReferenced(n, parent, grandparent))) {
+      names.add(n.name);
+    }
+    for (const k of t.VISITOR_KEYS[n.type] || []) {
+      const child = n[k];
+      if (Array.isArray(child)) child.forEach((c) => walk(c, n, parent));
+      else walk(child, n, parent);
+    }
+  })(node, null, null);
+  return names;
+}
+
+function containsFunction(node) {
+  let found = false;
+  t.traverseFast(node, (n) => {
+    if (isFunctionNode(n)) found = true;
+  });
+  return found;
+}
+
+function substituteIdentifiers(node, map) {
+  return rewriteTree(t.cloneNode(node, true), (n, parent) => {
+    if (t.isIdentifier(n) && map.has(n.name) && parent && t.isReferenced(n, parent)) {
+      return t.cloneNode(map.get(n.name), true);
+    }
+    if (t.isObjectProperty(n) && n.shorthand && t.isIdentifier(n.key) && map.has(n.key.name)) {
+      n.shorthand = false;
+    }
+    return undefined;
+  });
+}
+
+function templateLiteralToConcat(tl) {
+  const parts = [];
+  tl.quasis.forEach((q, i) => {
+    if (q.value.cooked) parts.push(t.stringLiteral(q.value.cooked));
+    if (tl.expressions[i]) parts.push(tl.expressions[i]);
+  });
+  if (parts.length === 0) return t.stringLiteral('');
+  if (!t.isStringLiteral(parts[0])) parts.unshift(t.stringLiteral(''));
+  return parts.reduce((acc, p) => t.binaryExpression('+', acc, p));
+}
+
+/** Folds `'a' + 'b'`, `('x')` and literal template strings into a single literal. */
+function foldConstants(node) {
+  return rewriteTree(t.cloneNode(node, true), (n) => {
+    if (t.isParenthesizedExpression(n) && (t.isStringLiteral(n.expression) || t.isNumericLiteral(n.expression))) {
+      return n.expression;
+    }
+    if (t.isBinaryExpression(n, { operator: '+' })) {
+      const lit = (x) => t.isStringLiteral(x) || t.isNumericLiteral(x);
+      if (lit(n.left) && lit(n.right)) {
+        const v = n.left.value + n.right.value;
+        return typeof v === 'string' ? t.stringLiteral(v) : t.numericLiteral(v);
+      }
+    }
+    if (t.isTemplateLiteral(n) && n.expressions.length === 0) {
+      return t.stringLiteral(n.quasis.map((q) => q.value.cooked).join(''));
+    }
+    return undefined;
+  });
+}
+
+// -----------------------------------------------------------------------------
+// TypeScript stripping (the .ux script block must be plain JS)
+// -----------------------------------------------------------------------------
+
+function stripTypes(ast) {
+  traverse(ast, {
+    'TSTypeAnnotation|TSTypeParameterDeclaration|TSTypeParameterInstantiation'(p) {
+      p.remove();
+    },
+    'TSAsExpression|TSSatisfiesExpression|TSNonNullExpression|TSTypeAssertion'(p) {
+      p.replaceWith(p.node.expression);
+    },
+    'TSInterfaceDeclaration|TSTypeAliasDeclaration|TSDeclareFunction|TSModuleDeclaration'(p) {
+      if (p.parentPath.isExportNamedDeclaration()) p.parentPath.remove();
+      else p.remove();
+    },
+    ImportDeclaration(p) {
+      if (p.node.importKind === 'type') {
+        p.remove();
+        return;
+      }
+      p.node.specifiers = p.node.specifiers.filter((s) => s.importKind !== 'type');
+    },
+    ExportNamedDeclaration(p) {
+      if (p.node.exportKind === 'type') p.remove();
+    },
+    Function(p) {
+      for (const param of p.node.params) {
+        if (param.optional) param.optional = false;
+      }
+    },
+    ClassProperty(p) {
+      p.node.accessibility = null;
+    },
+  });
+}
+
+/** Map a TS type annotation to a Vela prop `type` constructor name. */
+function velaTypeFor(tsType) {
+  if (!tsType) return null;
+  switch (tsType.type) {
+    case 'TSStringKeyword':
+      return 'String';
+    case 'TSNumberKeyword':
+      return 'Number';
+    case 'TSBooleanKeyword':
+      return 'Boolean';
+    case 'TSFunctionType':
+      return 'Function';
+    case 'TSArrayType':
+    case 'TSTupleType':
+      return 'Array';
+    case 'TSTypeLiteral':
+      return 'Object';
+    case 'TSLiteralType':
+      if (t.isStringLiteral(tsType.literal)) return 'String';
+      if (t.isNumericLiteral(tsType.literal)) return 'Number';
+      if (t.isBooleanLiteral(tsType.literal)) return 'Boolean';
+      return null;
+    case 'TSTypeReference': {
+      const n = t.isIdentifier(tsType.typeName) ? tsType.typeName.name : '';
+      if (n === 'Array' || n === 'ReadonlyArray') return 'Array';
+      if (n === 'Record') return 'Object';
+      return null;
+    }
+    case 'TSUnionType': {
+      const kinds = new Set(
+        tsType.types
+          .filter((x) => x.type !== 'TSUndefinedKeyword' && x.type !== 'TSNullKeyword')
+          .map(velaTypeFor),
+      );
+      return kinds.size === 1 ? [...kinds][0] : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Collect `{ propName: 'String' | ... }` from the first param's type annotation. */
+function collectPropTypes(ast, fnNode) {
+  const result = new Map();
+  const p0 = fnNode && fnNode.params && fnNode.params[0];
+  const ann = p0 && p0.typeAnnotation && p0.typeAnnotation.typeAnnotation;
+  if (!ann) return result;
+
+  let members = null;
+  if (t.isTSTypeLiteral(ann)) members = ann.members;
+  else if (t.isTSTypeReference(ann) && t.isIdentifier(ann.typeName)) {
+    const typeName = ann.typeName.name;
+    for (let stmt of ast.program.body) {
+      if (t.isExportNamedDeclaration(stmt) && stmt.declaration) stmt = stmt.declaration;
+      if (t.isTSInterfaceDeclaration(stmt) && stmt.id.name === typeName) members = stmt.body.body;
+      if (t.isTSTypeAliasDeclaration(stmt) && stmt.id.name === typeName && t.isTSTypeLiteral(stmt.typeAnnotation)) {
+        members = stmt.typeAnnotation.members;
+      }
+    }
+  }
+  for (const m of members || []) {
+    if (!t.isTSPropertySignature(m)) continue;
+    const name = propKeyName(m.key);
+    const type = velaTypeFor(m.typeAnnotation && m.typeAnnotation.typeAnnotation);
+    if (name && type) result.set(name, type);
+  }
+  return result;
+}
+
+// -----------------------------------------------------------------------------
+// CSS lint (Vela supports a small CSS subset)
+// -----------------------------------------------------------------------------
+
+function lintCss(css, ctx) {
+  const src = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const stack = [];
+  let buf = '';
+  for (const ch of src) {
+    if (ch === '{') {
+      const selector = buf.trim();
+      buf = '';
+      const parent = stack[stack.length - 1];
+      if (selector.startsWith('@')) {
+        stack.push(/^@(-\w+-)?keyframes/.test(selector) ? 'keyframes' : 'at');
+      } else if (parent === 'keyframes') {
+        stack.push('frame');
+      } else {
+        checkSelector(selector, ctx);
+        stack.push('rule');
+      }
+    } else if (ch === '}') {
+      if (stack[stack.length - 1] === 'rule') checkDeclarations(buf, ctx);
+      stack.pop();
+      buf = '';
+    } else {
+      buf += ch;
+    }
+  }
+}
+
+function checkSelector(selector, ctx) {
+  for (const raw of selector.split(',')) {
+    const sel = raw.trim();
+    if (!sel) continue;
+    let problem = null;
+    if (/[>+~]/.test(sel)) problem = 'combinators (>, +, ~)';
+    else if (/\s/.test(sel)) problem = 'descendant selectors';
+    else if (/::?[a-z-]+/i.test(sel)) problem = 'pseudo-classes / pseudo-elements';
+    else if (/\[/.test(sel)) problem = 'attribute selectors';
+    else if (/\*/.test(sel)) problem = 'the universal selector';
+    else if (/\.[\w-]+\.[\w-]/.test(sel)) problem = 'multiple class intersections (.a.b)';
+    if (problem) {
+      ctx.warn(
+        `CSS selector "${sel}" uses ${problem}, which Vela does not support. ` +
+        'Use a single .class, #id or tag selector (comma lists are fine).',
+      );
+    }
+  }
+}
+
+function checkDeclarations(body, ctx) {
+  for (const decl of body.split(';')) {
+    const m = /^\s*display\s*:\s*([^;]+?)\s*$/.exec(decl);
+    if (m && m[1] !== 'flex' && m[1] !== 'none') {
+      ctx.warn(`CSS "display: ${m[1]}" is not supported by Vela (only flex and none).`);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Template bindings
+// -----------------------------------------------------------------------------
+
+function exprToVelaBinding(node, ctx) {
+  let expr = t.cloneNode(node, true);
+  expr = rewriteTree(expr, (n) => (t.isTemplateLiteral(n) ? templateLiteralToConcat(n) : undefined));
+  if (containsFunction(expr)) expr = hoistBindingToComputed(node, expr, ctx);
+  if (ctx.component) bridgeModuleBindings(expr, ctx);
+  return dropThis(exprSource(expr));
+}
+
+/**
+ * Vela template expressions cannot contain functions (e.g. `items.filter(...)`).
+ * Move such expressions to a computed property when they do not depend on
+ * loop variables.
+ */
+function hoistBindingToComputed(original, expr, ctx) {
+  const comp = ctx.component;
+  const used = referencedNames(expr);
+  const loopVars = loopVarNames(ctx).filter((v) => used.has(v));
+  if (!comp || loopVars.length) {
+    ctx.warn(
+      `Template expression "${exprSource(original)}" contains a function, which Vela templates do not support. ` +
+      'Move it to a computed value.',
+    );
+    return expr;
+  }
+  const name = `kovoComputed${comp.computedCount++}`;
+  comp.computed.set(name, { expr: t.cloneNode(original, true) });
+  return t.identifier(name);
+}
+
+/**
+ * Module-level values read by the template must live on the ViewModel:
+ * constants are added to data, helper functions become methods.
+ */
+function bridgeModuleBindings(expr, ctx) {
+  const comp = ctx.component;
+  const loopVars = new Set(loopVarNames(ctx));
+  for (const name of referencedNames(expr)) {
+    if (loopVars.has(name) || comp.memberNames.has(name) || TEMPLATE_GLOBALS.has(name)) continue;
+    if (name.startsWith('$')) continue;
+    const kind = ctx.moduleBindings.get(name);
+    if (kind === 'function') comp.bridgedMethods.add(name);
+    else if (kind === 'value') comp.bridgedValues.add(name);
+  }
+}
+
+function serializeInterpolatedTemplate(tl, ctx) {
+  let out = '';
+  tl.quasis.forEach((q, i) => {
+    out += escapeXml(q.value.cooked);
+    const expr = tl.expressions[i] && unwrapParens(tl.expressions[i]);
+    if (!expr) return;
+    if (t.isStringLiteral(expr) || t.isNumericLiteral(expr)) out += escapeXml(String(expr.value));
+    else out += `{{${exprToVelaBinding(expr, ctx).replace(/"/g, "'")}}}`;
+  });
+  return out;
 }
 
 // -----------------------------------------------------------------------------
 // Attribute serialization
 // -----------------------------------------------------------------------------
 
-function serializeStringValue(value) {
+function serializeStringValue(value, ctx) {
   if (value === null) return 'true';
-  if (t.isStringLiteral(value)) return value.value;
+  if (t.isStringLiteral(value)) return escapeXml(value.value);
   if (t.isJSXExpressionContainer(value)) {
-    const expr = value.expression;
-    if (t.isStringLiteral(expr)) return expr.value;
+    const expr = t.isJSXEmptyExpression(value.expression) ? value.expression : foldConstants(value.expression);
+    if (t.isStringLiteral(expr)) return escapeXml(expr.value);
     if (t.isNumericLiteral(expr)) return String(expr.value);
     if (t.isBooleanLiteral(expr)) return String(expr.value);
     if (t.isNullLiteral(expr)) return '';
     if (t.isIdentifier(expr, { name: 'undefined' })) return '';
-    return `{{${exprToVelaBinding(expr)}}}`;
+    if (t.isTemplateLiteral(expr)) return serializeInterpolatedTemplate(expr, ctx);
+    return `{{${exprToVelaBinding(expr, ctx).replace(/"/g, "'")}}}`;
   }
   return '';
 }
 
-function serializeStyleObject(objExpr) {
+function serializeStyleObject(objExpr, ctx) {
   const parts = [];
   for (const prop of objExpr.properties) {
     if (t.isSpreadElement(prop)) {
       throw new Error('Spread `{...obj}` in style is not supported.');
     }
     if (!t.isObjectProperty(prop)) continue;
-    const key = t.isIdentifier(prop.key) ? prop.key.name : prop.key.value;
+    const key = propKeyName(prop.key);
     const valueNode = prop.value;
     let value;
     if (t.isStringLiteral(valueNode)) value = valueNode.value;
     else if (t.isNumericLiteral(valueNode)) value = String(valueNode.value);
     else if (t.isBooleanLiteral(valueNode)) value = String(valueNode.value);
+    else if (t.isTemplateLiteral(valueNode)) value = serializeInterpolatedTemplate(valueNode, ctx);
     else if (
       t.isMemberExpression(valueNode) ||
       t.isIdentifier(valueNode) ||
-      t.isCallExpression(valueNode)
+      t.isCallExpression(valueNode) ||
+      t.isBinaryExpression(valueNode) ||
+      t.isConditionalExpression(valueNode) ||
+      t.isLogicalExpression(valueNode)
     ) {
-      value = `{{${exprToVelaBinding(valueNode)}}}`;
+      value = `{{${exprToVelaBinding(valueNode, ctx).replace(/"/g, "'")}}}`;
     } else {
       throw new Error(`Unsupported style value: ${exprSource(valueNode)}`);
     }
@@ -174,7 +576,68 @@ function serializeStyleObject(objExpr) {
   return joined ? joined + ';' : '';
 }
 
-function serializeEventHandler(name, value, warnings) {
+/**
+ * Returns the Vela handler string for an arrow handler that only calls a
+ * method, or null when the handler must be hoisted into a generated method.
+ */
+function directHandlerCall(fn, ctx) {
+  let body = fn.body;
+  if (t.isBlockStatement(body)) {
+    if (body.body.length !== 1 || !t.isExpressionStatement(body.body[0])) return null;
+    body = body.body[0].expression;
+  }
+  if (!t.isCallExpression(body)) return null;
+
+  const comp = ctx.component;
+  let methodName = null;
+  if (t.isMemberExpression(body.callee) && t.isThisExpression(body.callee.object) && t.isIdentifier(body.callee.property)) {
+    methodName = body.callee.property.name;
+  } else if (t.isIdentifier(body.callee)) {
+    const n = body.callee.name;
+    if (comp && !comp.methods.has(n)) return null;
+    methodName = n;
+  }
+  if (!methodName) return null;
+
+  const args = body.arguments;
+  if (args.some((a) => t.isSpreadElement(a) || containsFunction(a))) return null;
+  if (comp && args.some((a) => {
+    const used = referencedNames(a);
+    return [...used].some((n) => comp.setters.has(n) || comp.eventProps.has(n));
+  })) return null;
+
+  const paramNames = fn.params.filter((p) => t.isIdentifier(p)).map((p) => p.name);
+  const usesParams = args.some((a) => [...referencedNames(a)].some((n) => paramNames.includes(n)));
+  if (usesParams) {
+    // Vela appends the event object as the last argument: `(e) => fn(e)` is just `fn`.
+    const last = args[args.length - 1];
+    if (comp && args.length === 1 && t.isIdentifier(last) && paramNames.length === 1 && last.name === paramNames[0]) {
+      return methodName;
+    }
+    if (comp) return null;
+  }
+  if (args.length === 0) return methodName;
+  return `${methodName}(${args.map((a) => exprToVelaBinding(a, ctx)).join(', ')})`;
+}
+
+/** Turn an inline handler into a generated method, passing loop vars along. */
+function hoistHandler(params, body, ctx) {
+  const comp = ctx.component;
+  const name = `kovoHandler${comp.handlerCount++}`;
+  const block = t.isBlockStatement(body) ? body : t.blockStatement([t.expressionStatement(body)]);
+  const used = referencedNames(block);
+  const loopParams = loopVarNames(ctx).filter((v) => used.has(v));
+  const fn = t.functionExpression(
+    null,
+    [...loopParams.map((v) => t.identifier(v)), ...params.map((p) => t.cloneNode(p, true))],
+    t.cloneNode(block, true),
+  );
+  comp.methods.set(name, fn);
+  comp.memberNames.add(name);
+  return loopParams.length ? `${name}(${loopParams.join(', ')})` : name;
+}
+
+function serializeEventHandler(name, value, ctx) {
   const velaAttr = `@${EVENT_MAP[name]}`;
   if (!value) {
     throw new Error(`Event handler ${name} must have a value.`);
@@ -185,63 +648,63 @@ function serializeEventHandler(name, value, warnings) {
   if (!t.isJSXExpressionContainer(value)) {
     throw new Error(`Event handler ${name} has invalid value.`);
   }
-  const expr = value.expression;
+  const expr = unwrapParens(value.expression);
+  const comp = ctx.component;
+
   if (t.isMemberExpression(expr) && t.isThisExpression(expr.object)) {
     return `${velaAttr}="${expr.property.name}"`;
   }
   if (t.isIdentifier(expr)) {
+    if (comp && (comp.setters.has(expr.name) || comp.eventProps.has(expr.name))) {
+      const evt = t.identifier('evt');
+      return `${velaAttr}="${hoistHandler([evt], t.callExpression(t.identifier(expr.name), [evt]), ctx)}"`;
+    }
     return `${velaAttr}="${expr.name}"`;
   }
-  if (t.isArrowFunctionExpression(expr) || t.isFunctionExpression(expr)) {
-    const body = expr.body;
-    if (t.isCallExpression(body) && t.isMemberExpression(body.callee) && t.isThisExpression(body.callee.object)) {
-      const methodName = body.callee.property.name;
-      const args = body.arguments.map((a) => exprToVelaBinding(a)).join(', ');
-      return `${velaAttr}="${methodName}(${args})"`;
-    }
-    if (t.isCallExpression(body) && t.isIdentifier(body.callee)) {
-      const methodName = body.callee.name;
-      const args = body.arguments.map((a) => exprToVelaBinding(a)).join(', ');
-      return `${velaAttr}="${methodName}(${args})"`;
-    }
+  if (isFunctionNode(expr)) {
+    const direct = directHandlerCall(expr, ctx);
+    if (direct) return `${velaAttr}="${direct.replace(/"/g, "'")}"`;
+    if (comp) return `${velaAttr}="${hoistHandler(expr.params, expr.body, ctx)}"`;
   }
-  warnings.push(
-    `Event handler ${name} has complex expression. Vela's @event uses a method name. Falling back to: ${exprToVelaBinding(expr)}`,
+  ctx.warn(
+    `Event handler ${name} has complex expression. Vela's @event uses a method name. Falling back to: ${exprToVelaBinding(expr, ctx)}`,
   );
-  return `${velaAttr}="${exprToVelaBinding(expr)}"`;
+  return `${velaAttr}="${exprToVelaBinding(expr, ctx).replace(/"/g, "'")}"`;
 }
 
-function serializeAttribute(attr, warnings, hasIdAttr = false) {
+function serializeAttribute(attr, ctx, element) {
   if (t.isJSXSpreadAttribute(attr)) {
     throw new Error('Spread `{...obj}` is not supported in Kovo.');
   }
   if (!t.isJSXAttribute(attr)) return null;
-  const name = attr.name.name;
+  const name = t.isJSXNamespacedName(attr.name)
+    ? `${attr.name.namespace.name}:${attr.name.name.name}`
+    : attr.name.name;
   const value = attr.value;
 
-  if (EVENT_MAP[name]) return serializeEventHandler(name, value, warnings);
+  if (EVENT_MAP[name]) return serializeEventHandler(name, value, ctx);
+
+  // `key` is consumed by the enclosing .map() (as `tid`).
+  if (name === 'key') return null;
 
   if (name === 'ref') {
-    if (hasIdAttr) return null;
+    if (element.hasIdAttr) return null;
     let refId = '';
     if (t.isJSXExpressionContainer(value)) {
-      refId = exprToVelaBinding(value.expression);
+      refId = exprToVelaBinding(value.expression, ctx);
     } else if (t.isStringLiteral(value)) {
       refId = value.value;
     }
-    if (refId) {
-      return `id="${refId}"`;
-    }
-    return null;
+    return refId ? `id="${refId}"` : null;
   }
 
-  if (name === 'className') {
-    return `class="${serializeStringValue(value)}"`;
+  if (name === 'className' || name === 'class') {
+    return `class="${serializeStringValue(value, ctx)}"`;
   }
 
   if (name === 'is') {
     if (t.isJSXExpressionContainer(value)) {
-      return `is="{{${exprToVelaBinding(value.expression)}}}"`;
+      return `is="{{${exprToVelaBinding(value.expression, ctx)}}}"`;
     }
     if (t.isStringLiteral(value)) {
       return `is="${value.value}"`;
@@ -249,13 +712,10 @@ function serializeAttribute(attr, warnings, hasIdAttr = false) {
   }
 
   if (name === 'style') {
-    if (
-      t.isJSXExpressionContainer(value) &&
-      t.isObjectExpression(value.expression)
-    ) {
-      return `style="${serializeStyleObject(value.expression)}"`;
+    if (t.isJSXExpressionContainer(value) && t.isObjectExpression(value.expression)) {
+      return `style="${serializeStyleObject(value.expression, ctx)}"`;
     }
-    return `style="${serializeStringValue(value)}"`;
+    return `style="${serializeStringValue(value, ctx)}"`;
   }
 
   if (value === null) {
@@ -265,74 +725,84 @@ function serializeAttribute(attr, warnings, hasIdAttr = false) {
     return `${camelToKebab(name)}="${escapeXml(value.value)}"`;
   }
   if (t.isJSXExpressionContainer(value)) {
-    const expr = value.expression;
+    const expr = t.isJSXEmptyExpression(value.expression) ? value.expression : foldConstants(value.expression);
     if (t.isBooleanLiteral(expr)) {
       return expr.value ? `${camelToKebab(name)}="true"` : null;
     }
     if (t.isNullLiteral(expr) || t.isIdentifier(expr, { name: 'undefined' })) {
       return null;
     }
-    const velaVal = exprToVelaBinding(expr);
+    if (t.isStringLiteral(expr)) {
+      return `${camelToKebab(name)}="${escapeXml(expr.value)}"`;
+    }
+    if (t.isTemplateLiteral(expr)) {
+      return `${camelToKebab(name)}="${serializeInterpolatedTemplate(expr, ctx)}"`;
+    }
+    const velaVal = exprToVelaBinding(expr, ctx);
     const safeVal = velaVal.replace(/"/g, "'");
     return `${camelToKebab(name)}="{{${safeVal}}}"`;
   }
   return null;
 }
 
+function directiveAttrs(opts) {
+  const attrs = [];
+  if (opts.ifExpr) attrs.push(`if="{{${opts.ifExpr}}}"`);
+  if (opts.elifExpr) attrs.push(`elif="{{${opts.elifExpr}}}"`);
+  if (opts.elseExpr) attrs.push('else');
+  if (opts.forExpr) attrs.push(`for="{{${opts.forExpr}}}"`);
+  if (opts.tid) attrs.push(`tid="${opts.tid}"`);
+  return attrs;
+}
+
 // -----------------------------------------------------------------------------
 // JSX serialization
 // -----------------------------------------------------------------------------
 
-function serializeJSXElement(node, warnings, opts = {}) {
+function wrapChildren(tag, attrStr, innerParts) {
+  if (innerParts.length === 0) return `<${tag}${attrStr}/>`;
+  const joined = innerParts.join('');
+  if (!joined.includes('\n') || TEXT_LIKE.has(tag)) {
+    return `<${tag}${attrStr}>${joined}</${tag}>`;
+  }
+  return `<${tag}${attrStr}>\n` + innerParts.map((p) => indent(p, 2)).join('\n') + `\n</${tag}>`;
+}
+
+function serializeChildren(node, ctx, parentTag) {
+  const parts = [];
+  for (const child of t.react.buildChildren(node)) {
+    const s = serializeJSXChild(child, ctx, parentTag);
+    if (s != null && s !== '') parts.push(s);
+  }
+  return parts;
+}
+
+function serializeJSXElement(node, ctx, opts = {}) {
   const name = getElementName(node);
-  if (isCustomComponent(name)) {
-    return serializeCustomComponent(node, name, warnings, opts);
+  if (isCustomComponent(name, ctx)) {
+    return serializeCustomComponent(node, name, ctx, opts);
   }
 
   const hasDirective = opts.ifExpr || opts.elifExpr || opts.elseExpr;
-  const hasIdAttr = node.openingElement.attributes.some(
-    (a) => t.isJSXAttribute(a) && a.name.name === 'id',
-  );
+  const element = {
+    hasIdAttr: node.openingElement.attributes.some(
+      (a) => t.isJSXAttribute(a) && a.name.name === 'id',
+    ),
+  };
   const attrs = [];
   for (const attr of node.openingElement.attributes) {
     if (t.isJSXAttribute(attr)) {
       const aname = t.isJSXIdentifier(attr.name) ? attr.name.name : '';
-      if (hasDirective && (aname === 'if' || aname === 'elif' || aname === 'else')) {
-        continue;
-      }
+      if (hasDirective && (aname === 'if' || aname === 'elif' || aname === 'else')) continue;
+      if (opts.tid && aname === 'tid') continue;
     }
-    const s = serializeAttribute(attr, warnings, hasIdAttr);
+    const s = serializeAttribute(attr, ctx, element);
     if (s) attrs.push(s);
   }
-  if (opts.ifExpr) attrs.push(`if="{{${opts.ifExpr}}}"`);
-  if (opts.elifExpr) attrs.push(`elif="{{${opts.elifExpr}}}"`);
-  if (opts.elseExpr) attrs.push('else');
-  if (opts.forExpr) attrs.push(`for="{{${opts.forExpr.item} in ${opts.forExpr.array}}}"`);
+  attrs.push(...directiveAttrs(opts));
 
   const attrStr = attrs.length ? ' ' + attrs.join(' ') : '';
-  const children = node.children;
-  if (children.length === 0) {
-    return `<${name}${attrStr}/>`;
-  }
-
-  const innerParts = [];
-  for (const child of children) {
-    const s = serializeJSXChild(child, warnings, name);
-    if (s != null && s !== '') innerParts.push(s);
-  }
-
-  if (innerParts.length === 0) {
-    return `<${name}${attrStr}/>`;
-  }
-  const joined = innerParts.join('');
-  if (!joined.includes('\n')) {
-    return `<${name}${attrStr}>${joined}</${name}>`;
-  }
-  return (
-    `<${name}${attrStr}>\n` +
-    innerParts.map((p) => indent(p, 2)).join('\n') +
-    `\n</${name}>`
-  );
+  return wrapChildren(name, attrStr, serializeChildren(node, ctx, name));
 }
 
 function indent(s, spaces) {
@@ -343,67 +813,79 @@ function indent(s, spaces) {
     .join('\n');
 }
 
-function serializeJSXFragment(fragment, warnings) {
-  warnings.push(
+/** Root fragment: Vela requires a single real root node (not <block>). */
+function serializeRootFragment(fragment, ctx) {
+  ctx.warn(
     'Fragment <> detected — wrapping in <div>. Vela requires a single root in <template>.',
   );
-  const inner = fragment.children
-    .map((c) => serializeJSXChild(c, warnings, 'div'))
-    .filter((s) => s != null && s !== '')
-    .join('\n');
-  if (!inner) return '<div></div>';
-  return `<div>\n${indent(inner, 2)}\n</div>`;
+  return wrapChildren('div', '', serializeChildren(fragment, ctx, 'div'));
 }
 
-function serializeJSXChild(child, warnings, parentTag) {
-  if (t.isJSXText(child)) {
-    const text = child.value.replace(/\s+/g, ' ');
-    if (!text.trim()) return null;
+/** Nested fragment: <block> renders its children without an extra node. */
+function serializeFragmentAsBlock(fragment, ctx, opts = {}) {
+  const attrs = directiveAttrs(opts);
+  const attrStr = attrs.length ? ' ' + attrs.join(' ') : '';
+  const inner = serializeChildren(fragment, ctx, 'block');
+  if (inner.length === 0 && !attrStr) return null;
+  return wrapChildren('block', attrStr, inner);
+}
+
+function serializeJSXChild(child, ctx, parentTag) {
+  if (t.isStringLiteral(child)) {
+    if (TEXT_LIKE.has(parentTag)) return escapeXml(child.value);
+    if (!child.value.trim()) return null;
+    const text = child.value.trim();
     if (CONTAINER_LIKE.has(parentTag)) {
-      warnings.push(
+      ctx.warn(
         `Plain text "${text}" inside <${parentTag}> is auto-wrapped in <text>. Vela requires <text> for textual content.`,
       );
-      return `<text>${escapeXml(text)}</text>`;
     }
-    return escapeXml(text);
+    return `<text>${escapeXml(text)}</text>`;
   }
-  if (t.isJSXElement(child)) return serializeJSXElement(child, warnings);
-  if (t.isJSXFragment(child)) return serializeJSXFragment(child, warnings);
-  if (t.isJSXExpressionContainer(child)) {
-    return serializeJSXExpression(child.expression, warnings, parentTag);
-  }
-  return null;
+  if (t.isJSXElement(child)) return serializeJSXElement(child, ctx);
+  if (t.isJSXFragment(child)) return serializeFragmentAsBlock(child, ctx);
+  if (t.isJSXSpreadChild(child)) throw new Error('Spread children `{...items}` are not supported.');
+  return serializeJSXExpression(child, ctx, parentTag);
 }
 
-function serializeJSXExpression(expr, warnings, parentTag) {
+function serializeJSXExpression(expr, ctx, parentTag) {
+  expr = unwrapParens(expr);
+  if (t.isJSXEmptyExpression(expr)) return null;
+  if (t.isBinaryExpression(expr) || t.isTemplateLiteral(expr)) expr = foldConstants(expr);
   if (t.isBooleanLiteral(expr)) return null;
   if (t.isNullLiteral(expr)) return null;
   if (t.isIdentifier(expr, { name: 'undefined' })) return null;
+  if (t.isJSXElement(expr)) return serializeJSXElement(expr, ctx);
+  if (t.isJSXFragment(expr)) return serializeFragmentAsBlock(expr, ctx);
 
   if (t.isLogicalExpression(expr) && expr.operator === '&&') {
-    return serializeConditional(expr, warnings);
+    return serializeConditional(expr, ctx);
   }
   if (t.isConditionalExpression(expr)) {
-    const isConsequentJSX = t.isJSXElement(expr.consequent) || t.isJSXFragment(expr.consequent);
-    const isAlternateJSX = t.isJSXElement(expr.alternate) || t.isJSXFragment(expr.alternate);
-    if (!isConsequentJSX && !isAlternateJSX) {
-      const binding = `{{${exprToVelaBinding(expr)}}}`;
+    const isJSX = (n) => {
+      n = unwrapParens(n);
+      return t.isJSXElement(n) || t.isJSXFragment(n) || t.isConditionalExpression(n) ||
+        (t.isLogicalExpression(n) && n.operator === '&&');
+    };
+    if (!isJSX(expr.consequent) && !isJSX(expr.alternate)) {
+      const binding = `{{${exprToVelaBinding(expr, ctx)}}}`;
       if (TEXT_LIKE.has(parentTag)) return binding;
       return `<text>${binding}</text>`;
     }
-    return serializeTernary(expr, warnings);
+    return serializeTernary(expr, ctx);
   }
   if (t.isCallExpression(expr)) {
     const callee = expr.callee;
-    if (
-      t.isMemberExpression(callee) &&
-      t.isIdentifier(callee.property, { name: 'map' })
-    ) {
-      return serializeMap(callee, expr.arguments, warnings);
+    if (t.isMemberExpression(callee) && t.isIdentifier(callee.property, { name: 'map' })) {
+      return serializeMap(callee, expr.arguments, ctx);
     }
   }
 
-  // String / Number literal children
+  if (t.isTemplateLiteral(expr)) {
+    const text = serializeInterpolatedTemplate(expr, ctx);
+    if (TEXT_LIKE.has(parentTag)) return text;
+    return `<text>${text}</text>`;
+  }
   if (t.isStringLiteral(expr)) {
     if (TEXT_LIKE.has(parentTag)) return escapeXml(expr.value);
     return `<text>${escapeXml(expr.value)}</text>`;
@@ -413,14 +895,16 @@ function serializeJSXExpression(expr, warnings, parentTag) {
     return `<text>${String(expr.value)}</text>`;
   }
 
-  // Identifier / MemberExpression / CallExpression: bind via {{...}}
   if (
     t.isIdentifier(expr) ||
     t.isMemberExpression(expr) ||
+    t.isOptionalMemberExpression(expr) ||
     t.isCallExpression(expr) ||
-    t.isBinaryExpression(expr)
+    t.isBinaryExpression(expr) ||
+    t.isUnaryExpression(expr) ||
+    t.isLogicalExpression(expr)
   ) {
-    const binding = `{{${exprToVelaBinding(expr)}}}`;
+    const binding = `{{${exprToVelaBinding(expr, ctx)}}}`;
     if (TEXT_LIKE.has(parentTag)) return binding;
     return `<text>${binding}</text>`;
   }
@@ -428,75 +912,60 @@ function serializeJSXExpression(expr, warnings, parentTag) {
   throw new Error(`Unsupported JSX expression: ${exprSource(expr)}`);
 }
 
-function serializeConditional(logical, warnings) {
-  const cond = exprToVelaBinding(logical.left);
-  const right = logical.right;
+function serializeConditional(logical, ctx) {
+  const cond = exprToVelaBinding(logical.left, ctx);
+  const right = unwrapParens(logical.right);
   if (t.isJSXElement(right)) {
-    return serializeJSXElement(right, warnings, { ifExpr: cond });
+    return serializeJSXElement(right, ctx, { ifExpr: cond });
   }
   if (t.isJSXFragment(right)) {
-    warnings.push(
-      `\`cond && <></>\` detected — wrapping fragment in <div> with \`if="{{${cond}}}\`\`.`,
-    );
-    const inner = right.children
-      .map((c) => serializeJSXChild(c, warnings, 'div'))
-      .filter((s) => s != null && s !== '');
-    const innerXml = inner.length
-      ? `<div if="{{${cond}}}">\n` +
-        inner.map((p) => indent(p, 2)).join('\n') +
-        `\n</div>`
-      : `<div if="{{${cond}}}" />`;
-    return innerXml;
-  }
-  if (t.isParenthesizedExpression(right)) {
-    return serializeConditional(
-      { left: logical.left, right: right.expression, operator: '&&' },
-      warnings,
-    );
+    return serializeFragmentAsBlock(right, ctx, { ifExpr: cond }) || `<block if="{{${cond}}}"/>`;
   }
   if (t.isConditionalExpression(right)) {
-    const outerCond = exprToVelaBinding(logical.left);
-    return serializeTernaryWithPrefix(outerCond, right, warnings);
+    return serializeTernaryWithPrefix(cond, right, ctx);
+  }
+  if (t.isLogicalExpression(right) && right.operator === '&&') {
+    return serializeConditional(
+      t.logicalExpression('&&', t.logicalExpression('&&', logical.left, right.left), right.right),
+      ctx,
+    );
+  }
+  if (t.isCallExpression(right) && t.isMemberExpression(right.callee) &&
+      t.isIdentifier(right.callee.property, { name: 'map' })) {
+    // `if` beats `for` on the same tag in Vela, so guard the loop with a block.
+    const loop = serializeMap(right.callee, right.arguments, ctx);
+    return `<block if="{{${cond}}}">\n${indent(loop, 2)}\n</block>`;
   }
   throw new Error(
     `Right side of \`&&\` must be a single JSX element. Got: ${exprSource(right)}`,
   );
 }
 
-function serializeTernaryElement(element, warnings, opts) {
+function serializeTernaryElement(element, ctx, opts) {
   if (t.isJSXFragment(element)) {
-    const inner = element.children
-      .map(c => serializeJSXChild(c, warnings, 'div'))
-      .filter(s => s != null && s !== '')
-      .join('\n');
-    const attrStr = opts.ifExpr ? ` if="{{${opts.ifExpr}}}"` :
-      opts.elifExpr ? ` elif="{{${opts.elifExpr}}}"` :
-      opts.elseExpr ? ' else' : '';
-    if (!inner) return `<div${attrStr}/>`;
-    return `<div${attrStr}>\n${indent(inner, 2)}\n</div>`;
+    return serializeFragmentAsBlock(element, ctx, opts) || `<block${' ' + directiveAttrs(opts).join(' ')}/>`;
   }
-  return serializeJSXElement(element, warnings, opts);
+  return serializeJSXElement(element, ctx, opts);
 }
 
 function flattenTernary(ternary) {
   const pairs = [];
   let current = ternary;
   while (t.isConditionalExpression(current)) {
-    let elem = current.consequent;
-    while (t.isParenthesizedExpression(elem)) elem = elem.expression;
-    if (t.isLogicalExpression(elem) && elem.operator === '&&' && t.isJSXElement(elem.right)) {
+    const elem = unwrapParens(current.consequent);
+    if (t.isLogicalExpression(elem) && elem.operator === '&&' && t.isJSXElement(unwrapParens(elem.right))) {
       const combined = t.logicalExpression('&&', current.test, elem.left);
-      pairs.push({ cond: combined, element: elem.right });
+      pairs.push({ cond: combined, element: unwrapParens(elem.right) });
     } else if (t.isJSXElement(elem) || t.isJSXFragment(elem)) {
       pairs.push({ cond: current.test, element: elem });
+    } else if (t.isNullLiteral(elem) || t.isIdentifier(elem, { name: 'undefined' })) {
+      pairs.push({ cond: current.test, element: null });
     } else {
       throw new Error(`Ternary branch must be a JSX element. Got: ${exprSource(elem)}`);
     }
-    current = current.alternate;
+    current = unwrapParens(current.alternate);
   }
-  if (t.isJSXElement(current)) {
-    pairs.push({ cond: null, element: current });
-  } else if (t.isJSXFragment(current)) {
+  if (t.isJSXElement(current) || t.isJSXFragment(current)) {
     pairs.push({ cond: null, element: current });
   } else if (t.isNullLiteral(current) || t.isIdentifier(current, { name: 'undefined' })) {
     pairs.push({ cond: null, element: null });
@@ -506,99 +975,349 @@ function flattenTernary(ternary) {
   return pairs;
 }
 
-function serializeTernaryWithPrefix(prefix, ternary, warnings) {
+function serializeTernaryWithPrefix(prefix, ternary, ctx) {
   const pairs = flattenTernary(ternary);
   if (pairs.length < 2) {
     throw new Error('Ternary must have at least 2 branches.');
   }
   const results = [];
+  const previous = [];
+  for (const { cond, element } of pairs) {
+    const condStr = cond ? exprToVelaBinding(cond, ctx) : null;
+    if (element) {
+      const guards = previous.map((c) => `!(${c})`);
+      if (condStr) guards.push(condStr);
+      const full = [prefix, ...guards].join(' && ');
+      results.push(serializeTernaryElement(element, ctx, { ifExpr: full }));
+    }
+    if (condStr) previous.push(condStr);
+  }
+  return results.join('\n');
+}
+
+function serializeTernary(ternary, ctx) {
+  const pairs = flattenTernary(ternary);
+  if (pairs.length < 2) {
+    throw new Error('Ternary must have at least 2 branches.');
+  }
+  const results = [];
+  let chainStarted = false;
   for (let i = 0; i < pairs.length; i++) {
     const { cond, element } = pairs[i];
-    if (!element) continue;
-    if (i === 0) {
-      const condStr = `${prefix} && ${exprToVelaBinding(cond)}`;
-      results.push(serializeTernaryElement(element, warnings, { ifExpr: condStr }));
-    } else if (i < pairs.length - 1) {
-      const condStr = `${prefix} && ${exprToVelaBinding(cond)}`;
-      results.push(serializeTernaryElement(element, warnings, { elifExpr: condStr }));
-    } else {
-      const prevCond = pairs[i - 1] && pairs[i - 1].cond;
-      if (prevCond) {
-        const negated = `${prefix} && !(${exprToVelaBinding(prevCond)})`;
-        results.push(serializeTernaryElement(element, warnings, { ifExpr: negated }));
-      } else {
-        results.push(serializeTernaryElement(element, warnings, { ifExpr: prefix }));
+    const isLast = i === pairs.length - 1;
+    if (!element) {
+      // An empty branch in the middle breaks the if/elif chain: negate it into later branches.
+      if (!isLast && cond) {
+        const rest = pairs.slice(i + 1);
+        const neg = `!(${exprToVelaBinding(cond, ctx)})`;
+        const prev = pairs.slice(0, i).filter((p) => p.cond).map((p) => `!(${exprToVelaBinding(p.cond, ctx)})`);
+        for (const p of rest) {
+          if (!p.element) continue;
+          const guards = [...prev, neg];
+          if (p.cond) guards.push(exprToVelaBinding(p.cond, ctx));
+          results.push(serializeTernaryElement(p.element, ctx, { ifExpr: guards.join(' && ') }));
+          if (p.cond) prev.push(`!(${exprToVelaBinding(p.cond, ctx)})`);
+        }
+        break;
       }
+      continue;
     }
-  }
-  return results.join('\n');
-}
-
-function serializeTernary(ternary, warnings) {
-  const pairs = flattenTernary(ternary);
-  if (pairs.length < 2) {
-    throw new Error('Ternary must have at least 2 branches.');
-  }
-  const results = [];
-  for (let i = 0; i < pairs.length; i++) {
-    const { cond, element } = pairs[i];
-    if (!element) continue;
-    if (i === 0) {
-      const condStr = exprToVelaBinding(cond);
-      results.push(serializeTernaryElement(element, warnings, { ifExpr: condStr }));
-    } else if (i < pairs.length - 1) {
-      const condStr = exprToVelaBinding(cond);
-      results.push(serializeTernaryElement(element, warnings, { elifExpr: condStr }));
+    if (!chainStarted) {
+      results.push(serializeTernaryElement(element, ctx, { ifExpr: exprToVelaBinding(cond, ctx) }));
+      chainStarted = true;
+    } else if (!isLast) {
+      results.push(serializeTernaryElement(element, ctx, { elifExpr: exprToVelaBinding(cond, ctx) }));
     } else {
-      results.push(serializeTernaryElement(element, warnings, { elseExpr: true }));
+      results.push(serializeTernaryElement(element, ctx, { elseExpr: true }));
     }
   }
   return results.join('\n');
 }
 
-function serializeMap(memberExpr, args, warnings) {
-  const arrayExpr = memberExpr.object;
-  const arraySrc = exprToVelaBinding(arrayExpr);
+function checkLoopVarName(name) {
+  if (/^[$_]/.test(name)) {
+    throw new Error(`map() parameter "${name}" cannot start with $ or _ (Vela reserves those names in for loops).`);
+  }
+}
 
+function keyAttrOf(node) {
+  node = unwrapParens(node);
+  if (t.isLogicalExpression(node)) node = unwrapParens(node.right);
+  if (!t.isJSXElement(node)) return null;
+  const attr = node.openingElement.attributes.find(
+    (a) => t.isJSXAttribute(a) && a.name.name === 'key',
+  );
+  return attr || null;
+}
+
+/** React `key` -> Vela `tid` (which only accepts a property name of the item). */
+function keyToTid(keyAttr, loop, ctx) {
+  if (!keyAttr || !t.isJSXExpressionContainer(keyAttr.value)) return null;
+  const expr = keyAttr.value.expression;
+  if (t.isMemberExpression(expr) && !expr.computed && t.isIdentifier(expr.object, { name: loop.item }) &&
+      t.isIdentifier(expr.property)) {
+    return expr.property.name;
+  }
+  if (t.isIdentifier(expr) && loop.destructured.has(expr.name)) return expr.name;
+  if (t.isIdentifier(expr) && (expr.name === loop.item || expr.name === loop.index)) return null;
+  ctx.warn(
+    `key={${exprSource(expr)}} cannot become a Vela tid (tid only takes a property name of the item). Using the index.`,
+  );
+  return null;
+}
+
+function serializeMap(memberExpr, args, ctx) {
   if (args.length === 0) {
     throw new Error('map() requires a callback.');
   }
   const cb = args[0];
-  if (!t.isArrowFunctionExpression(cb) && !t.isFunctionExpression(cb)) {
+  if (!isFunctionNode(cb)) {
     throw new Error('map() callback must be a function (arrow or expression).');
   }
   if (cb.params.length === 0) {
     throw new Error('map() callback must have at least one parameter (item).');
   }
+
+  const depth = ctx.loops.length;
   const itemParam = cb.params[0];
-  if (!t.isIdentifier(itemParam)) {
+  let itemName;
+  const destructured = new Map();
+  if (t.isIdentifier(itemParam)) {
+    itemName = itemParam.name;
+  } else if (t.isObjectPattern(itemParam)) {
+    itemName = depth ? `kovoItem${depth}` : 'kovoItem';
+    for (const prop of itemParam.properties) {
+      if (!t.isObjectProperty(prop) || !t.isIdentifier(prop.value)) {
+        throw new Error('map() callback parameter destructuring only supports `({ a, b }) =>`.');
+      }
+      destructured.set(prop.value.name, t.memberExpression(t.identifier(itemName), t.identifier(propKeyName(prop.key))));
+    }
+  } else {
     throw new Error('map() callback parameter must be a simple identifier.');
   }
-  let itemName = itemParam.name;
-  if (cb.params.length >= 2) {
-    const idxParam = cb.params[1];
-    if (t.isIdentifier(idxParam)) {
-      itemName = `(${idxParam.name}, ${itemName})`;
+  checkLoopVarName(itemName);
+  let indexName = null;
+  if (cb.params.length >= 2 && t.isIdentifier(cb.params[1])) {
+    indexName = cb.params[1].name;
+    checkLoopVarName(indexName);
+  }
+
+  let body = cb.body;
+  if (t.isBlockStatement(body)) {
+    const stmts = body.body;
+    if (stmts.length === 1 && t.isReturnStatement(stmts[0]) && stmts[0].argument) {
+      body = stmts[0].argument;
+    } else {
+      throw new Error('map() callback body must be a single JSX element (a block body may only contain `return <X/>`; move other logic to a computed value).');
     }
   }
-  const body = cb.body;
-  if (!t.isJSXElement(body)) {
+  body = unwrapParens(body);
+  if (destructured.size) body = substituteIdentifiers(body, destructured);
+
+  const isJSXBody = t.isJSXElement(body);
+  const isConditionalBody = t.isJSXFragment(body) || t.isConditionalExpression(body) ||
+    (t.isLogicalExpression(body) && body.operator === '&&');
+  if (!isJSXBody && !isConditionalBody) {
     throw new Error('map() callback body must be a single JSX element.');
   }
-  return serializeJSXElement(body, warnings, {
-    forExpr: { item: itemName, array: arraySrc },
-  });
+
+  // Evaluated outside the loop scope.
+  const arraySrc = exprToVelaBinding(memberExpr.object, ctx);
+  const forExpr = indexName ? `(${indexName}, ${itemName}) in ${arraySrc}` : `${itemName} in ${arraySrc}`;
+
+  const loop = { item: itemName, index: indexName, destructured: new Set(destructured.keys()) };
+  ctx.loops.push(loop);
+  try {
+    const tid = keyToTid(keyAttrOf(body), loop, ctx) || undefined;
+    if (isJSXBody) {
+      return serializeJSXElement(body, ctx, { forExpr, tid });
+    }
+    // Vela evaluates `if` before `for` on one tag, so per-item conditions need a <block>.
+    const inner = t.isJSXFragment(body)
+      ? serializeChildren(body, ctx, 'block').join('\n')
+      : serializeJSXExpression(body, ctx, 'block');
+    const attrs = directiveAttrs({ forExpr, tid });
+    return `<block ${attrs.join(' ')}>\n${indent(inner, 2)}\n</block>`;
+  } finally {
+    ctx.loops.pop();
+  }
 }
 
-let _templateImports = [];
+// -----------------------------------------------------------------------------
+// Custom components
+// -----------------------------------------------------------------------------
 
-function serializeCustomComponent(node, name, warnings, opts) {
-  const importInfo = _componentRegistry ? _componentRegistry.get(name) : null;
-  const importSrc = importInfo ? importInfo.src : null;
-  let kebabName = name.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()).replace(/^-/, '');
+function resolveComponentFile(src, ctx) {
+  if (!ctx.filename || !path.isAbsolute(ctx.filename) || /\.ux$/.test(src)) return null;
+  const base = path.resolve(path.dirname(ctx.filename), src);
+  const candidates = [base, `${base}.tsx`, `${base}.jsx`, path.join(base, 'index.tsx')];
+  return candidates.find((c) => /\.(t|j)sx$/.test(c) && fs.existsSync(c)) || null;
+}
 
-  if (importSrc && !_templateImports.some(imp => imp.name === kebabName)) {
-    _templateImports.push({ name: kebabName, src: importSrc });
+/**
+ * Stateless components (props + JSX only) are inlined into the parent at
+ * compile time: Vela docs advise against custom components on watches because
+ * each one gets its own ViewModel.
+ */
+function loadInlineComponent(name, ctx) {
+  const info = ctx.componentRegistry.get(name);
+  if (!info || !ctx.component || ctx.options.inline === false) return null;
+  const file = resolveComponentFile(info.src, ctx);
+  if (!file) return null;
+  if (ctx.inlineCache.has(file)) return ctx.inlineCache.get(file);
+
+  let model = null;
+  try {
+    const ast = parser.parse(fs.readFileSync(file, 'utf8'), {
+      sourceType: 'module',
+      plugins: ['jsx', 'typescript'],
+    });
+    model = analyzeInlineCandidate(ast);
+  } catch (e) {
+    model = null;
+  }
+  ctx.inlineCache.set(file, model);
+  return model;
+}
+
+function analyzeInlineCandidate(ast) {
+  let fn = null;
+  let style = '';
+  for (const stmt of ast.program.body) {
+    if (t.isExportNamedDeclaration(stmt) && t.isVariableDeclaration(stmt.declaration)) {
+      for (const d of stmt.declaration.declarations) {
+        if (t.isIdentifier(d.id, { name: 'inline' }) && t.isBooleanLiteral(d.init, { value: false })) return null;
+        if (t.isIdentifier(d.id, { name: 'style' })) style = cssFromNode(d.init) || '';
+      }
+    }
+    if (t.isExportDefaultDeclaration(stmt)) fn = stmt.declaration;
+  }
+  if (!t.isFunctionDeclaration(fn) && !isFunctionNode(fn)) return null;
+
+  const props = new Map();
+  const p0 = fn.params[0];
+  let propsObjectName = null;
+  if (t.isObjectPattern(p0)) {
+    for (const prop of p0.properties) {
+      if (!t.isObjectProperty(prop)) return null;
+      const key = propKeyName(prop.key);
+      if (t.isAssignmentPattern(prop.value) && t.isIdentifier(prop.value.left, { name: key })) {
+        props.set(key, prop.value.right);
+      } else if (t.isIdentifier(prop.value, { name: key })) {
+        props.set(key, null);
+      } else {
+        return null;
+      }
+    }
+  } else if (t.isIdentifier(p0)) {
+    propsObjectName = p0.name;
+  } else if (p0) {
+    return null;
+  }
+
+  const consts = new Map();
+  let jsx = null;
+  const stmts = t.isBlockStatement(fn.body) ? fn.body.body : [t.returnStatement(fn.body)];
+  for (const stmt of stmts) {
+    if (t.isVariableDeclaration(stmt)) {
+      for (const d of stmt.declarations) {
+        if (!t.isIdentifier(d.id) || !d.init) return null;
+        if (d.id.name === 'style') {
+          style = cssFromNode(d.init) || style;
+          continue;
+        }
+        if (t.isCallExpression(d.init) && /^use[A-Z]/.test(calleeName(d.init))) return null;
+        if (isFunctionNode(d.init)) return null;
+        consts.set(d.id.name, d.init);
+      }
+    } else if (t.isReturnStatement(stmt)) {
+      jsx = unwrapParens(stmt.argument);
+    } else {
+      return null;
+    }
+  }
+  if (!t.isJSXElement(jsx) && !t.isJSXFragment(jsx)) return null;
+
+  if (propsObjectName) {
+    // `props.title` -> `title`
+    const rewrite = (n) => rewriteTree(n, (node) => {
+      if (t.isMemberExpression(node) && !node.computed && t.isIdentifier(node.object, { name: propsObjectName })) {
+        const key = node.property.name;
+        if (!props.has(key)) props.set(key, null);
+        return t.identifier(key);
+      }
+      return undefined;
+    });
+    jsx = rewrite(jsx);
+    for (const [k, v] of consts) consts.set(k, rewrite(v));
+  }
+
+  // Only inline when everything the template reads is a prop or derived const.
+  let nested = false;
+  t.traverseFast(jsx, (n) => {
+    if (t.isJSXOpeningElement(n) && t.isJSXIdentifier(n.name) && /^[A-Z]/.test(n.name.name)) nested = true;
+  });
+  if (nested) return null;
+  const allowed = new Set([...props.keys(), ...consts.keys(), ...TEMPLATE_GLOBALS]);
+  const loopLocals = new Set();
+  t.traverseFast(jsx, (n) => {
+    if (isFunctionNode(n)) n.params.forEach((p) => referencedNames(p).forEach((x) => loopLocals.add(x)));
+  });
+  for (const used of [jsx, ...consts.values()].map(referencedNames)) {
+    for (const n of used) {
+      if (!allowed.has(n) && !loopLocals.has(n)) return null;
+    }
+  }
+  return { props, consts, jsx, style };
+}
+
+function serializeInlinedComponent(node, name, model, ctx, opts) {
+  const subst = new Map();
+  const given = new Map();
+  for (const attr of node.openingElement.attributes) {
+    if (!t.isJSXAttribute(attr)) throw new Error('Spread `{...obj}` is not supported in Kovo.');
+    const attrName = attr.name.name;
+    if (attrName === 'key') continue;
+    let value;
+    if (attr.value === null) value = t.booleanLiteral(true);
+    else if (t.isStringLiteral(attr.value)) value = t.stringLiteral(attr.value.value);
+    else if (t.isJSXExpressionContainer(attr.value)) value = attr.value.expression;
+    if (!model.props.has(attrName)) {
+      ctx.warn(`<${name}> has no prop "${attrName}"; the attribute is ignored.`);
+      continue;
+    }
+    given.set(attrName, value);
+  }
+  for (const [prop, def] of model.props) {
+    subst.set(prop, given.get(prop) || def || t.identifier('undefined'));
+  }
+  for (const [cname, init] of model.consts) {
+    subst.set(cname, t.parenthesizedExpression(substituteIdentifiers(init, subst)));
+  }
+  if (serializeChildren(node, ctx, 'block').length) {
+    ctx.warn(`Children passed to <${name}> are ignored: Vela components have no <slot>.`);
+  }
+  if (!ctx.inlinedComponents.has(name)) {
+    ctx.inlinedComponents.add(name);
+    if (model.style.trim()) ctx.inlineStyles.push(model.style);
+  }
+  const root = substituteIdentifiers(model.jsx, subst);
+  if (t.isJSXFragment(root)) {
+    return serializeFragmentAsBlock(root, ctx, opts) || '';
+  }
+  return serializeJSXElement(root, ctx, opts);
+}
+
+function serializeCustomComponent(node, name, ctx, opts) {
+  ctx.usedComponents.add(name);
+  const inlineModel = loadInlineComponent(name, ctx);
+  if (inlineModel) return serializeInlinedComponent(node, name, inlineModel, ctx, opts);
+
+  const importInfo = ctx.componentRegistry.get(name);
+  const kebabName = pascalToKebab(name);
+
+  if (importInfo && !ctx.templateImports.some((imp) => imp.name === kebabName)) {
+    ctx.templateImports.push({ name: kebabName, src: importInfo.src });
   }
 
   const COMPONENT_EVENT_RE = /^on[A-Z]/;
@@ -606,15 +1325,22 @@ function serializeCustomComponent(node, name, warnings, opts) {
   for (const attr of node.openingElement.attributes) {
     if (!t.isJSXAttribute(attr)) continue;
     const attrName = t.isJSXIdentifier(attr.name) ? attr.name.name : '';
-    if (!attrName) continue;
+    if (!attrName || attrName === 'key') continue;
 
     if (COMPONENT_EVENT_RE.test(attrName)) {
-      const eventName = attrName.replace(/^on/, '');
-      const eventKebab = eventName.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()).replace(/^-/, '');
+      const eventKebab = pascalToKebab(attrName.replace(/^on/, ''));
       const value = attr.value;
       let handler = '';
-      if (t.isJSXExpressionContainer(value)) {
-        handler = exprToVelaBinding(value.expression);
+      if (t.isJSXExpressionContainer(value) && ctx.component) {
+        // Kovo children emit `{ kovoArgs: [...] }`; unwrap it for the parent handler.
+        const evt = t.identifier('evt');
+        ctx.usesKovoArgs = true;
+        const call = t.callExpression(t.cloneNode(value.expression, true), [
+          t.spreadElement(t.callExpression(t.identifier('kovoArgs'), [evt])),
+        ]);
+        handler = hoistHandler([evt], call, ctx);
+      } else if (t.isJSXExpressionContainer(value)) {
+        handler = exprToVelaBinding(value.expression, ctx);
       } else if (t.isStringLiteral(value)) {
         handler = value.value;
       }
@@ -631,29 +1357,731 @@ function serializeCustomComponent(node, name, warnings, opts) {
       continue;
     }
     if (t.isJSXExpressionContainer(attr.value)) {
-      const velaVal = exprToVelaBinding(attr.value.expression);
+      const velaVal = exprToVelaBinding(attr.value.expression, ctx);
       const safeVal = velaVal.replace(/"/g, "'");
       attrs.push(`${camelToKebab(attrName)}="{{${safeVal}}}"`);
       continue;
     }
-    warnings.push(`Custom component attr ${attrName} dropped (unsupported value type).`);
+    ctx.warn(`Custom component attr ${attrName} dropped (unsupported value type).`);
   }
 
-  if (opts.ifExpr) attrs.push(`if="{{${opts.ifExpr}}}"`);
-  if (opts.elifExpr) attrs.push(`elif="{{${opts.elifExpr}}}"`);
-  if (opts.elseExpr) attrs.push('else');
-  if (opts.forExpr) attrs.push(`for="{{${opts.forExpr.item} in ${opts.forExpr.array}}}"`);
+  attrs.push(...directiveAttrs(opts));
 
-  const children = node.children;
-  const innerParts = [];
-  for (const child of children) {
-    const s = serializeJSXChild(child, warnings, kebabName);
-    if (s != null && s !== '') innerParts.push(s);
+  const innerParts = serializeChildren(node, ctx, kebabName);
+  if (innerParts.length) {
+    ctx.warn(`Children passed to <${name}>: Vela documents no <slot>, so they may not render.`);
   }
-
   const attrStr = attrs.length ? ' ' + attrs.join(' ') : '';
   if (innerParts.length === 0) return `<${kebabName}${attrStr}/>`;
   return `<${kebabName}${attrStr}>${innerParts.join('')}</${kebabName}>`;
+}
+
+// -----------------------------------------------------------------------------
+// Function components: analysis
+// -----------------------------------------------------------------------------
+
+function createComponentModel(kind) {
+  return {
+    kind,
+    props: new Map(), // name -> { default: node|null, type: string|null }
+    eventProps: new Map(), // onSelect -> 'select'
+    state: new Map(), // name -> { init: node }
+    setters: new Map(), // setName -> name
+    refs: new Map(), // name -> { init, dom, elementId }
+    computed: new Map(), // name -> { expr } | { fn }
+    methods: new Map(), // name -> function node
+    constants: new Map(), // template-bound constants -> init node
+    derived: [], // [{ name, init, kind }]
+    hoisted: [], // module-level declarations
+    effects: [], // [{ fn, deps }]
+    bridgedMethods: new Set(),
+    bridgedValues: new Set(),
+    memberNames: new Set(),
+    templateNode: null,
+    styleCss: '',
+    handlerCount: 0,
+    computedCount: 0,
+  };
+}
+
+function findHookInAst(ast, name) {
+  for (let stmt of ast.program.body) {
+    if (t.isExportNamedDeclaration(stmt) && stmt.declaration) stmt = stmt.declaration;
+    if (t.isFunctionDeclaration(stmt) && stmt.id && stmt.id.name === name) return stmt;
+    if (t.isVariableDeclaration(stmt)) {
+      for (const d of stmt.declarations) {
+        if (t.isIdentifier(d.id, { name }) && isFunctionNode(d.init)) return d.init;
+      }
+    }
+  }
+  return null;
+}
+
+/** Normalizes the props parameter: `({ a = 1 })` or `(props)` + `props.a`. */
+function collectProps(fnPath, model, ctx, propTypes) {
+  const p0Path = fnPath.get('params.0');
+  if (!p0Path || !p0Path.node) return;
+  const p0 = p0Path.node;
+
+  const addProp = (name, def) => {
+    if (/^on[A-Z]/.test(name)) {
+      model.eventProps.set(name, lowerFirst(name.slice(2)));
+      return;
+    }
+    if (!model.props.has(name)) model.props.set(name, { default: def, type: propTypes.get(name) || null });
+  };
+
+  if (t.isObjectPattern(p0)) {
+    for (const propPath of p0Path.get('properties')) {
+      const prop = propPath.node;
+      if (t.isRestElement(prop)) {
+        ctx.warn('Rest props (`...rest`) are not supported and are ignored.');
+        continue;
+      }
+      const key = propKeyName(prop.key);
+      let local = prop.value;
+      let def = null;
+      if (t.isAssignmentPattern(local)) {
+        def = local.right;
+        local = local.left;
+      }
+      if (!t.isIdentifier(local)) {
+        ctx.warn(`Nested destructuring of prop "${key}" is not supported.`);
+        continue;
+      }
+      if (local.name !== key) fnPath.scope.rename(local.name, key);
+      addProp(key, def);
+    }
+  } else if (t.isIdentifier(p0)) {
+    const binding = fnPath.scope.getBinding(p0.name);
+    for (const ref of binding ? binding.referencePaths : []) {
+      const parent = ref.parentPath;
+      if (parent.isMemberExpression({ object: ref.node }) && !parent.node.computed) {
+        const key = parent.node.property.name;
+        addProp(key, null);
+        parent.replaceWith(t.identifier(key));
+      } else {
+        ctx.warn(`"${p0.name}" is used as a whole object; only "${p0.name}.x" access is supported.`);
+      }
+    }
+  }
+}
+
+/**
+ * Inline a custom hook: clone it, substitute parameters with call arguments
+ * and rename returned bindings to the names the caller destructures.
+ */
+function inlineHook(name, call, pattern, model, ctx, ast, depth) {
+  const hook = findHookInAst(ast, name);
+  if (!hook) {
+    ctx.warn(`Custom hook ${name}() is not defined in this file; only same-file hooks are inlined.`);
+    return;
+  }
+  if (depth > 10) throw new Error(`Custom hook ${name}() recursion is too deep.`);
+
+  const clone = t.cloneNode(hook, true);
+  const fnExpr = t.isFunctionDeclaration(clone)
+    ? t.functionExpression(null, clone.params, clone.body)
+    : clone;
+  const file = t.file(t.program([
+    t.variableDeclaration('const', [t.variableDeclarator(t.identifier('kovoHook'), fnExpr)]),
+  ]));
+  let fnPath = null;
+  traverse(file, {
+    Function(p) {
+      if (!fnPath) fnPath = p;
+      p.stop();
+    },
+  });
+
+  const args = (call && call.arguments) || [];
+  fnPath.node.params.forEach((param, i) => {
+    let pname = null;
+    let def = null;
+    if (t.isIdentifier(param)) pname = param.name;
+    else if (t.isAssignmentPattern(param) && t.isIdentifier(param.left)) {
+      pname = param.left.name;
+      def = param.right;
+    }
+    if (!pname) {
+      ctx.warn(`Hook ${name}(): destructured parameters are not supported.`);
+      return;
+    }
+    const value = args[i] ? args[i] : def || t.identifier('undefined');
+    const binding = fnPath.scope.getBinding(pname);
+    if (binding && binding.constantViolations.length) {
+      ctx.warn(`Hook ${name}(): parameter "${pname}" is reassigned; inlining may change behavior.`);
+    }
+    for (const ref of binding ? binding.referencePaths : []) ref.replaceWith(t.cloneNode(value, true));
+  });
+
+  let body = fnPath.node.body;
+  if (!t.isBlockStatement(body)) body = t.blockStatement([t.returnStatement(body)]);
+  const ret = body.body.find((s) => t.isReturnStatement(s));
+  const retArg = ret && unwrapParens(ret.argument);
+
+  const renames = [];
+  if (t.isObjectPattern(pattern) && t.isObjectExpression(retArg)) {
+    for (const prop of pattern.properties) {
+      if (!t.isObjectProperty(prop) || !t.isIdentifier(prop.value)) continue;
+      const key = propKeyName(prop.key);
+      const ret = retArg.properties.find((p) => t.isObjectProperty(p) && propKeyName(p.key) === key);
+      if (!ret) {
+        ctx.warn(`Hook ${name}() does not return "${key}".`);
+        continue;
+      }
+      if (t.isIdentifier(ret.value) && ret.value.name !== prop.value.name) renames.push([ret.value.name, prop.value.name]);
+      else if (!t.isIdentifier(ret.value)) ctx.warn(`Hook ${name}(): returned "${key}" must be a plain identifier.`);
+    }
+  } else if (t.isArrayPattern(pattern) && t.isArrayExpression(retArg)) {
+    pattern.elements.forEach((el, i) => {
+      const ret = retArg.elements[i];
+      if (t.isIdentifier(el) && t.isIdentifier(ret) && ret.name !== el.name) renames.push([ret.name, el.name]);
+    });
+  } else if (pattern && !t.isObjectPattern(pattern) && !t.isArrayPattern(pattern)) {
+    ctx.warn(`Hook ${name}(): destructure its result (const { a } = ${name}()) so Kovo can inline it.`);
+  }
+  // Rename through a temporary name so swaps (a<->b) do not collide.
+  renames.forEach(([from], i) => fnPath.scope.rename(from, `kovoTmp${i}`));
+  renames.forEach(([, to], i) => fnPath.scope.rename(`kovoTmp${i}`, to));
+
+  for (const stmt of fnPath.node.body.body || []) {
+    if (t.isReturnStatement(stmt)) continue;
+    processComponentStatement(stmt, model, ctx, ast, depth + 1, false);
+  }
+}
+
+function processComponentStatement(stmt, model, ctx, ast, depth, isRoot) {
+  if (t.isVariableDeclaration(stmt)) {
+    for (const decl of stmt.declarations) {
+      processDeclarator(decl, stmt.kind, model, ctx, ast, depth);
+    }
+    return;
+  }
+  if (t.isFunctionDeclaration(stmt)) {
+    model.methods.set(stmt.id.name, stmt);
+    return;
+  }
+  if (t.isExpressionStatement(stmt) && t.isCallExpression(stmt.expression)) {
+    const call = stmt.expression;
+    const name = calleeName(call);
+    if (name === 'useEffect' || name === 'useLayoutEffect') {
+      model.effects.push({ fn: call.arguments[0], deps: call.arguments[1] || null });
+      return;
+    }
+    if (/^use[A-Z]/.test(name) && !KNOWN_HOOKS.has(name)) {
+      inlineHook(name, call, null, model, ctx, ast, depth);
+      return;
+    }
+  }
+  if (t.isReturnStatement(stmt) && isRoot) {
+    model.templateNode = unwrapParens(stmt.argument);
+    return;
+  }
+  if (t.isIfStatement(stmt)) {
+    let hasReturn = false;
+    t.traverseFast(stmt, (n) => {
+      if (t.isReturnStatement(n)) hasReturn = true;
+    });
+    if (hasReturn) {
+      throw new Error('Early returns are not supported in components. Use a ternary or `cond && <X/>` inside the returned JSX.');
+    }
+  }
+  if (t.isEmptyStatement(stmt)) return;
+  ctx.warn(`Statement ignored in component body (move it into a function or useEffect): ${exprSource(stmt).slice(0, 60)}`);
+}
+
+function processDeclarator(decl, declKind, model, ctx, ast, depth) {
+  const init = decl.init;
+  const id = decl.id;
+  const hook = t.isCallExpression(init) ? calleeName(init) : '';
+
+  if (hook === 'useState') {
+    if (!t.isArrayPattern(id)) {
+      ctx.warn('useState() result must be destructured: const [value, setValue] = useState(...).');
+      return;
+    }
+    const [stateId, setterId] = id.elements;
+    if (!t.isIdentifier(stateId)) return;
+    let initVal = init.arguments[0] || t.nullLiteral();
+    if (isFunctionNode(initVal) && initVal.params.length === 0) {
+      initVal = t.isBlockStatement(initVal.body) ? t.callExpression(initVal, []) : initVal.body;
+    }
+    model.state.set(stateId.name, { init: initVal });
+    if (t.isIdentifier(setterId)) model.setters.set(setterId.name, stateId.name);
+    return;
+  }
+  if (hook === 'useRef') {
+    if (t.isIdentifier(id)) model.refs.set(id.name, { init: init.arguments[0] || t.nullLiteral(), dom: false, elementId: id.name });
+    return;
+  }
+  if (hook === 'useMemo') {
+    if (t.isIdentifier(id) && isFunctionNode(init.arguments[0])) model.computed.set(id.name, { fn: init.arguments[0] });
+    return;
+  }
+  if (hook === 'useCallback') {
+    if (t.isIdentifier(id) && isFunctionNode(init.arguments[0])) model.methods.set(id.name, init.arguments[0]);
+    return;
+  }
+  if (/^use[A-Z]/.test(hook)) {
+    if (KNOWN_HOOKS.has(hook)) return;
+    if (['useContext', 'useReducer', 'useId', 'useTransition', 'useDeferredValue'].includes(hook)) {
+      ctx.warn(`${hook}() is not supported by Kovo.`);
+      return;
+    }
+    inlineHook(hook, init, id, model, ctx, ast, depth);
+    return;
+  }
+  if (t.isIdentifier(id) && isFunctionNode(init)) {
+    model.methods.set(id.name, init);
+    return;
+  }
+  if (t.isIdentifier(id, { name: 'style' })) {
+    const css = cssFromNode(init);
+    if (css !== null) model.styleCss = css;
+    return;
+  }
+  if (t.isIdentifier(id) && init) {
+    model.derived.push({ name: id.name, init, kind: declKind });
+    return;
+  }
+  if (init) {
+    model.hoisted.push(t.variableDeclaration(declKind, [decl]));
+  }
+}
+
+function classifyDerived(model, ctx) {
+  const reactive = new Set([
+    ...model.state.keys(), ...model.props.keys(), ...model.computed.keys(),
+    ...model.eventProps.keys(), ...model.setters.keys(), ...model.methods.keys(),
+  ]);
+  for (const name of model.refs.keys()) reactive.add(name);
+  const templateNames = model.templateNode ? referencedNames(model.templateNode) : new Set();
+  for (const { name, init, kind } of model.derived) {
+    const used = referencedNames(init);
+    if ([...used].some((n) => reactive.has(n))) {
+      model.computed.set(name, { expr: init });
+      reactive.add(name);
+    } else if (templateNames.has(name)) {
+      model.constants.set(name, init);
+      reactive.add(name);
+    } else {
+      model.hoisted.push(t.variableDeclaration(kind, [t.variableDeclarator(t.identifier(name), init)]));
+    }
+  }
+}
+
+function markDomRefs(model) {
+  if (!model.templateNode) return;
+  t.traverseFast(model.templateNode, (n) => {
+    if (!t.isJSXOpeningElement(n)) return;
+    const refAttr = n.attributes.find((a) => t.isJSXAttribute(a) && a.name.name === 'ref');
+    if (!refAttr || !t.isJSXExpressionContainer(refAttr.value) || !t.isIdentifier(refAttr.value.expression)) return;
+    const ref = model.refs.get(refAttr.value.expression.name);
+    if (!ref) return;
+    ref.dom = true;
+    const idAttr = n.attributes.find((a) => t.isJSXAttribute(a) && a.name.name === 'id');
+    if (idAttr && t.isStringLiteral(idAttr.value)) ref.elementId = idAttr.value.value;
+  });
+}
+
+function validateMemberNames(model) {
+  const check = (name, what) => {
+    if (/^[$_]/.test(name)) {
+      throw new Error(`${what} "${name}" cannot start with $ or _ (reserved by Vela).`);
+    }
+    if (RESERVED_NAMES.has(name)) {
+      throw new Error(`${what} "${name}" is a reserved Vela name (for, if, elif, else, show, tid).`);
+    }
+  };
+  for (const n of model.state.keys()) check(n, 'State');
+  for (const n of model.props.keys()) check(n, 'Prop');
+  for (const n of model.computed.keys()) check(n, 'Computed value');
+  for (const n of model.constants.keys()) check(n, 'Value');
+}
+
+function detectKind(fnNode, filename, options) {
+  if (options.kind === 'page' || options.kind === 'component') return options.kind;
+  const normalized = String(filename || '').replace(/\\/g, '/');
+  if (/\/components\//.test(normalized)) return 'component';
+  if (/\/pages\//.test(normalized)) return 'page';
+  return fnNode.params && fnNode.params.length > 0 ? 'component' : 'page';
+}
+
+function analyzeFunctionComponent(fnPath, ast, ctx, propTypes) {
+  const fnNode = fnPath.node;
+  const model = createComponentModel(detectKind(fnNode, ctx.filename, ctx.options));
+  collectProps(fnPath, model, ctx, propTypes);
+
+  const body = fnPath.node.body;
+  const stmts = t.isBlockStatement(body) ? body.body : [t.returnStatement(body)];
+  for (const stmt of stmts) processComponentStatement(stmt, model, ctx, ast, 0, true);
+
+  classifyDerived(model, ctx);
+  markDomRefs(model);
+  validateMemberNames(model);
+
+  for (const map of [model.state, model.props, model.eventProps, model.refs, model.computed,
+    model.methods, model.constants, model.setters]) {
+    for (const k of map.keys()) model.memberNames.add(k);
+  }
+  return model;
+}
+
+// -----------------------------------------------------------------------------
+// Function components: script rewriting (scope-aware)
+// -----------------------------------------------------------------------------
+
+/**
+ * Rewrites a function body so component members point at the ViewModel:
+ *   count            -> this.count          (state, props, computed, values)
+ *   setCount(x)      -> this.count = x
+ *   setCount(c => c + 1) -> this.count = this.count + 1
+ *   inputRef.current -> this.$element('inputRef')
+ *   onSelect(v)      -> this.$emit('select', { kovoArgs: [v] })
+ * Only identifiers that are NOT bound inside the function are rewritten, so
+ * local variables, parameters and strings are never touched.
+ */
+function rewriteFunction(fnNode, model, ctx) {
+  const fn = t.cloneNode(fnNode, true);
+  let body = fn.body;
+  if (!t.isBlockStatement(body)) body = t.blockStatement([t.returnStatement(body)]);
+  const root = t.functionExpression(null, fn.params, body, !!fn.generator, !!fn.async);
+  const file = t.file(t.program([t.expressionStatement(root)]));
+  let needsSelf = false;
+
+  const self = (p) => {
+    const owner = p.findParent((x) => x.isFunction() && !x.isArrowFunctionExpression());
+    if (!owner || owner.node === root) return t.thisExpression();
+    needsSelf = true;
+    return t.identifier('kovoSelf');
+  };
+  const member = (p, name) => t.memberExpression(self(p), t.identifier(name));
+  const isFree = (p, name) => !p.scope.hasBinding(name, true);
+
+  traverse(file, {
+    MemberExpression(p) {
+      const { node } = p;
+      if (node.computed || !t.isIdentifier(node.object) || !t.isIdentifier(node.property, { name: 'current' })) return;
+      const name = node.object.name;
+      const ref = model.refs.get(name);
+      if (!ref || !ref.dom || !isFree(p, name)) return;
+      p.replaceWith(t.callExpression(member(p, '$element'), [t.stringLiteral(ref.elementId)]));
+      p.skip();
+    },
+    CallExpression: {
+      exit(p) {
+        const callee = p.node.callee;
+        if (!t.isIdentifier(callee) || !isFree(p.get('callee'), callee.name)) return;
+        const name = callee.name;
+        if (model.setters.has(name)) {
+          const stateName = model.setters.get(name);
+          const target = () => member(p, stateName);
+          const argPath = p.get('arguments.0');
+          let rhs;
+          if (!argPath || !argPath.node) {
+            rhs = t.identifier('undefined');
+          } else if (argPath.isFunction() && argPath.node.params.length <= 1) {
+            const param = argPath.node.params[0];
+            if (!t.isBlockStatement(argPath.node.body) && (!param || t.isIdentifier(param))) {
+              if (param) {
+                const binding = argPath.scope.getBinding(param.name);
+                for (const ref of binding ? binding.referencePaths : []) ref.replaceWith(target());
+              }
+              rhs = argPath.node.body;
+            } else {
+              rhs = t.callExpression(argPath.node, [target()]);
+            }
+          } else {
+            rhs = argPath.node;
+          }
+          p.replaceWith(t.assignmentExpression('=', target(), rhs));
+        } else if (model.eventProps.has(name)) {
+          p.replaceWith(t.callExpression(member(p, '$emit'), [
+            t.stringLiteral(model.eventProps.get(name)),
+            t.objectExpression([t.objectProperty(t.identifier('kovoArgs'), t.arrayExpression(p.node.arguments))]),
+          ]));
+        }
+      },
+    },
+    Identifier(p) {
+      if (!p.isReferencedIdentifier()) return;
+      const name = p.node.name;
+      if (!model.memberNames.has(name) || !isFree(p, name)) return;
+      const parent = p.parent;
+      const isCallee = t.isCallExpression(parent) && parent.callee === p.node;
+
+      if (model.setters.has(name)) {
+        if (isCallee) return;
+        // Setter used as a value: a function that behaves like React's setter.
+        const stateName = model.setters.get(name);
+        const v = t.identifier('v');
+        const target = t.memberExpression(t.thisExpression(), t.identifier(stateName));
+        p.replaceWith(t.arrowFunctionExpression([v], t.assignmentExpression('=', target,
+          t.conditionalExpression(
+            t.binaryExpression('===', t.unaryExpression('typeof', v), t.stringLiteral('function')),
+            t.callExpression(v, [t.cloneNode(target)]),
+            v,
+          ))));
+        p.skip();
+        return;
+      }
+      if (model.eventProps.has(name)) {
+        if (isCallee) return;
+        // `if (onSelect)` / `onSelect && ...`: parents may always listen, so it is truthy.
+        const isTest = (t.isIfStatement(parent) || t.isConditionalExpression(parent)) && parent.test === p.node ||
+          t.isLogicalExpression(parent) && parent.left === p.node ||
+          t.isUnaryExpression(parent, { operator: '!' });
+        if (isTest) {
+          p.replaceWith(t.booleanLiteral(true));
+          return;
+        }
+        const a = t.identifier('args');
+        p.replaceWith(t.arrowFunctionExpression([t.restElement(a)], t.callExpression(
+          t.memberExpression(t.thisExpression(), t.identifier('$emit')),
+          [t.stringLiteral(model.eventProps.get(name)),
+            t.objectExpression([t.objectProperty(t.identifier('kovoArgs'), a)])],
+        )));
+        p.skip();
+        return;
+      }
+      if (model.methods.has(name) && !isCallee) {
+        p.replaceWith(t.callExpression(t.memberExpression(member(p, name), t.identifier('bind')), [self(p)]));
+        p.skip();
+        return;
+      }
+      const ref = model.refs.get(name);
+      if (ref && ref.dom) {
+        ctx.warn(`DOM ref "${name}" is only supported as ${name}.current.`);
+        p.replaceWith(t.callExpression(member(p, '$element'), [t.stringLiteral(ref.elementId)]));
+        p.skip();
+        return;
+      }
+      p.replaceWith(member(p, name));
+      p.skip();
+    },
+  });
+
+  if (needsSelf) {
+    root.body.body.unshift(t.variableDeclaration('const', [
+      t.variableDeclarator(t.identifier('kovoSelf'), t.thisExpression()),
+    ]));
+  }
+  return root;
+}
+
+function objectMethod(name, fn) {
+  return t.objectMethod('method', t.identifier(name), fn.params, fn.body, false, fn.generator, fn.async);
+}
+
+function isStaticInit(node, model) {
+  const used = referencedNames(node);
+  return ![...used].some((n) => model.memberNames.has(n));
+}
+
+/** `[a, obj.b]` deps -> ['a', 'obj.b'] watch paths. */
+function depPaths(deps, model, ctx) {
+  const paths = [];
+  for (const el of deps.elements) {
+    let n = el;
+    const parts = [];
+    while (t.isMemberExpression(n) && !n.computed && t.isIdentifier(n.property)) {
+      parts.unshift(n.property.name);
+      n = n.object;
+    }
+    if (t.isIdentifier(n) && model.memberNames.has(n.name) && !model.methods.has(n.name) &&
+        !model.setters.has(n.name)) {
+      if (model.refs.has(n.name)) continue;
+      paths.push([n.name, ...parts].join('.'));
+    } else if (t.isIdentifier(n) && (model.methods.has(n.name) || model.setters.has(n.name))) {
+      continue;
+    } else {
+      ctx.warn(`useEffect dependency "${exprSource(el)}" cannot be watched; only state, props and computed values can.`);
+    }
+  }
+  return paths;
+}
+
+function hasTopLevelReturn(block) {
+  let found = false;
+  (function walk(n) {
+    if (!n || typeof n.type !== 'string' || found) return;
+    if (t.isReturnStatement(n) && n.argument) {
+      found = true;
+      return;
+    }
+    if (t.isFunction(n)) return;
+    for (const k of t.VISITOR_KEYS[n.type] || []) {
+      const c = n[k];
+      if (Array.isArray(c)) c.forEach(walk);
+      else walk(c);
+    }
+  })(block);
+  return found;
+}
+
+const thisMember = (name) => t.memberExpression(t.thisExpression(), t.identifier(name));
+const callThis = (name, args = []) => t.expressionStatement(t.callExpression(thisMember(name), args));
+
+function buildFunctionScript(model, ctx) {
+  const props = [];
+  const lifecycle = { onInit: [], onReady: [], onDestroy: [] };
+  const extraMethods = [];
+
+  // props
+  if (model.kind === 'component' && model.props.size) {
+    props.push(t.objectProperty(t.identifier('props'), t.objectExpression(
+      [...model.props].map(([name, info]) => {
+        const fields = [];
+        if (info.default) fields.push(t.objectProperty(t.identifier('default'), t.cloneNode(info.default, true)));
+        if (info.type) fields.push(t.objectProperty(t.identifier('type'), t.identifier(info.type)));
+        return t.objectProperty(t.identifier(name), t.objectExpression(fields));
+      }),
+    )));
+  } else if (model.kind === 'page' && model.props.size) {
+    ctx.warn('Pages do not receive props; router params arrive as state. Declare them with useState().');
+  }
+
+  // data: pages use `protected` so in-app router params can override values.
+  const data = [];
+  for (const [name, { init }] of model.state) {
+    if (isStaticInit(init, model)) {
+      data.push(t.objectProperty(t.identifier(name), t.cloneNode(init, true)));
+    } else {
+      data.push(t.objectProperty(t.identifier(name), t.nullLiteral()));
+      lifecycle.onInit.push(t.expressionStatement(t.assignmentExpression('=', thisMember(name), t.cloneNode(init, true))));
+    }
+  }
+  for (const [name, init] of model.constants) {
+    data.push(t.objectProperty(t.identifier(name), t.cloneNode(init, true)));
+  }
+  for (const name of model.bridgedValues) {
+    data.push(t.objectProperty(t.identifier(name), t.identifier(name)));
+  }
+  if (data.length || model.kind === 'page') {
+    const key = model.kind === 'page' ? 'protected' : 'data';
+    props.push(t.objectProperty(t.identifier(key), t.objectExpression(data)));
+  }
+
+  // Non-DOM refs are plain (non-reactive) ViewModel fields.
+  for (const [name, ref] of model.refs) {
+    if (ref.dom) continue;
+    lifecycle.onInit.push(t.expressionStatement(t.assignmentExpression('=', thisMember(name),
+      t.objectExpression([t.objectProperty(t.identifier('current'), t.cloneNode(ref.init, true))]))));
+  }
+
+  // effects
+  let warnedNoDeps = false;
+  model.effects.forEach((eff, i) => {
+    if (!isFunctionNode(eff.fn)) {
+      ctx.warn('useEffect() expects a function.');
+      return;
+    }
+    let block = eff.fn.body;
+    if (!t.isBlockStatement(block)) block = t.blockStatement([t.expressionStatement(block)]);
+    const hasCleanup = hasTopLevelReturn(block);
+    let paths = [];
+    if (!eff.deps) {
+      if (!warnedNoDeps) {
+        ctx.warn('useEffect() without a dependency array runs once: Vela has no re-render cycle. Pass [deps] to re-run on changes.');
+        warnedNoDeps = true;
+      }
+    } else if (t.isArrayExpression(eff.deps)) {
+      paths = depPaths(eff.deps, model, ctx);
+    }
+    const used = referencedNames(block);
+    const usesDom = [...model.refs].some(([name, ref]) => ref.dom && used.has(name));
+    const hook = usesDom ? 'onReady' : 'onInit';
+
+    if (!hasCleanup && paths.length === 0) {
+      const scoped = block.body.some((st) => t.isVariableDeclaration(st) && st.kind !== 'var' ||
+        t.isFunctionDeclaration(st) || t.isClassDeclaration(st));
+      const cloned = t.cloneNode(block, true);
+      if (scoped) lifecycle[hook].push(cloned);
+      else lifecycle[hook].push(...cloned.body);
+      return;
+    }
+    const methodName = `kovoEffect${i}`;
+    const cleanupName = `kovoCleanup${i}`;
+    const stmts = hasCleanup
+      ? [
+        t.ifStatement(
+          t.binaryExpression('===', t.unaryExpression('typeof', thisMember(cleanupName)), t.stringLiteral('function')),
+          callThis(cleanupName),
+        ),
+        t.expressionStatement(t.assignmentExpression('=', thisMember(cleanupName),
+          t.callExpression(t.arrowFunctionExpression([], t.cloneNode(block, true)), []))),
+      ]
+      : t.cloneNode(block, true).body;
+    extraMethods.push([methodName, t.functionExpression(null, [], t.blockStatement(stmts))]);
+    lifecycle[hook].push(callThis(methodName));
+    for (const p of paths) {
+      lifecycle[hook].push(callThis('$watch', [t.stringLiteral(p), t.stringLiteral(methodName)]));
+    }
+    if (hasCleanup) {
+      lifecycle.onDestroy.push(t.ifStatement(
+        t.binaryExpression('===', t.unaryExpression('typeof', thisMember(cleanupName)), t.stringLiteral('function')),
+        callThis(cleanupName),
+      ));
+    }
+  });
+
+  // computed
+  if (model.computed.size) {
+    props.push(t.objectProperty(t.identifier('computed'), t.objectExpression(
+      [...model.computed].map(([name, c]) => {
+        const fn = c.fn || t.functionExpression(null, [], t.blockStatement([t.returnStatement(t.cloneNode(c.expr, true))]));
+        return objectMethod(name, rewriteFunction(fn, model, ctx));
+      }),
+    )));
+  }
+
+  // methods
+  for (const [name, fn] of model.methods) {
+    props.push(objectMethod(name, rewriteFunction(fn, model, ctx)));
+  }
+  for (const [name, fn] of extraMethods) {
+    props.push(objectMethod(name, rewriteFunction(fn, model, ctx)));
+  }
+  for (const name of model.bridgedMethods) {
+    if (!model.methods.has(name)) props.push(t.objectProperty(t.identifier(name), t.identifier(name), false, true));
+  }
+
+  // lifecycles
+  for (const [hook, stmts] of Object.entries(lifecycle)) {
+    if (!stmts.length) continue;
+    const fn = t.functionExpression(null, [], t.blockStatement(stmts));
+    props.push(objectMethod(hook, rewriteFunction(fn, model, ctx)));
+  }
+
+  return generator(t.exportDefaultDeclaration(t.objectExpression(props))).code;
+}
+
+function processFunctionalComponent(fnPath, ctx, ast, propTypes) {
+  const model = analyzeFunctionComponent(fnPath, ast, ctx, propTypes);
+  ctx.component = model;
+  let templateXml = null;
+  try {
+    const node = model.templateNode;
+    if (t.isJSXElement(node)) templateXml = serializeJSXElement(node, ctx);
+    else if (t.isJSXFragment(node)) templateXml = serializeRootFragment(node, ctx);
+    else if (node && !t.isNullLiteral(node)) {
+      ctx.warn('Component root is not a single JSX element — wrapping it in <div>.');
+      templateXml = wrapChildren('div', '', [serializeJSXExpression(node, ctx, 'div')].filter(Boolean));
+    }
+  } finally {
+    ctx.component = null;
+  }
+  if (!model.templateNode) {
+    ctx.warn('Component returns no JSX. If the JSX starts on the line after `return`, wrap it in parentheses: return ( <div/> ).');
+  }
+  const scriptPropLines = buildFunctionScript(model, ctx);
+  return {
+    templateXml,
+    styleCss: model.styleCss,
+    scriptPropLines,
+    hoisted: model.hoisted.map((d) => generator(d).code),
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -664,300 +2092,36 @@ function getLineNumber(node) {
   return (node && node.loc && node.loc.start && node.loc.start.line) || 0;
 }
 
-function extractASTLineMap(ast) {
-  const map = {};
-  function walk(node, topLevel) {
-    if (!node || typeof node !== 'object') return;
-    if (node.type && node.loc) {
-      const l = node.loc.start.line;
-      if (!map[l]) {
-        map[l] = { type: node.type, endLine: node.loc.end.line };
+function collectModuleBindings(ast) {
+  const map = new Map();
+  for (let stmt of ast.program.body) {
+    if (t.isExportNamedDeclaration(stmt) && stmt.declaration) stmt = stmt.declaration;
+    if (t.isFunctionDeclaration(stmt) && stmt.id) map.set(stmt.id.name, 'function');
+    if (t.isVariableDeclaration(stmt)) {
+      for (const d of stmt.declarations) {
+        if (t.isIdentifier(d.id)) map.set(d.id.name, isFunctionNode(d.init) ? 'function' : 'value');
       }
     }
-    for (const key of Object.keys(node)) {
-      if (key === 'loc' || key === 'start' || key === 'end') continue;
-      const val = node[key];
-      if (Array.isArray(val)) {
-        for (const item of val) walk(item, false);
-      } else {
-        walk(val, false);
-      }
+    if (t.isImportDeclaration(stmt)) {
+      for (const s of stmt.specifiers) map.set(s.local.name, 'value');
     }
   }
-  walk(ast, true);
   return map;
 }
 
-function formatMethodFromFn(name, fnNode, setterToState, dataObj, propsObj, refsSet = new Set()) {
-  const stateKeys = new Set([...Object.keys(dataObj), ...Object.keys(propsObj)]);
-  const params = (fnNode.params || []).map((p) => generator(p).code).join(', ');
-
-  const bodyAst = t.cloneNode(fnNode.body, true);
-
-  function replaceSettersAndRefs(node) {
-    if (!node || typeof node !== 'object') return;
-
-    if (t.isMemberExpression(node)) {
-      if (t.isIdentifier(node.object) && refsSet.has(node.object.name) && t.isIdentifier(node.property, { name: 'current' })) {
-        const refName = node.object.name;
-        const elCall = t.callExpression(
-          t.memberExpression(t.thisExpression(), t.identifier('$element')),
-          [t.stringLiteral(refName)]
-        );
-        delete node.object;
-        delete node.property;
-        delete node.computed;
-        Object.assign(node, elCall);
-      }
-    }
-
-    if (t.isExpressionStatement(node) && t.isCallExpression(node.expression)) {
-      const callee = node.expression.callee;
-      if (t.isIdentifier(callee) && setterToState.has(callee.name)) {
-        const stateVar = setterToState.get(callee.name);
-        const arg = node.expression.arguments[0];
-        let rhs = 'null';
-        if (arg) {
-          if (t.isArrowFunctionExpression(arg) || t.isFunctionExpression(arg)) {
-            const pName = arg.params[0] ? arg.params[0].name : 'prev';
-            let eCode = generator(arg.body).code;
-            eCode = eCode.replace(new RegExp(`\\b${pName}\\b`, 'g'), `this.${stateVar}`);
-            rhs = eCode;
-          } else {
-            rhs = generator(arg).code;
-          }
-        }
-        for (const k of stateKeys) {
-          rhs = rhs.replace(new RegExp(`(?<!\\.|this\\.)\\b${k}\\b`, 'g'), `this.${k}`);
-        }
-        node.expression = t.assignmentExpression('=', t.memberExpression(t.thisExpression(), t.identifier(stateVar)), t.identifier(rhs));
-      }
-    }
-    for (const key of Object.keys(node)) {
-      if (key === 'loc' || key === 'start' || key === 'end') continue;
-      const val = node[key];
-      if (Array.isArray(val)) {
-        for (const item of val) replaceSettersAndRefs(item);
-      } else {
-        replaceSettersAndRefs(val);
-      }
-    }
+function resolveExportedFunction(programPath, decl) {
+  if (!t.isIdentifier(decl)) return null;
+  const binding = programPath.scope.getBinding(decl.name);
+  if (!binding) return null;
+  if (binding.path.isFunctionDeclaration()) return binding.path;
+  if (binding.path.isVariableDeclarator()) {
+    const init = binding.path.get('init');
+    if (init.isFunction()) return init;
   }
-  replaceSettersAndRefs(bodyAst);
-
-  let bodyCode = generator(bodyAst).code;
-  for (const k of stateKeys) {
-    bodyCode = bodyCode.replace(new RegExp(`(?<!\\.|this\\.)\\b${k}\\b`, 'g'), `this.${k}`);
-  }
-  return `${name}(${params}) ${bodyCode}`;
+  return null;
 }
 
-function findHookInAst(ast, name) {
-  let found = null;
-  traverse(ast, {
-    FunctionDeclaration(path) {
-      if (path.node.id && path.node.id.name === name) {
-        found = path.node;
-      }
-    },
-    VariableDeclarator(path) {
-      if (
-        t.isIdentifier(path.node.id) &&
-        path.node.id.name === name &&
-        (t.isArrowFunctionExpression(path.node.init) || t.isFunctionExpression(path.node.init))
-      ) {
-        found = path.node.init;
-      }
-    },
-  });
-  return found;
-}
-
-function inlineHookIntoComponent(hookFn, callDecl, dataObj, setterToState, methodsObj, lifecyclesObj, propsObj, refsSet = new Set()) {
-  const paramMap = new Map();
-  const args = callDecl.init ? callDecl.init.arguments : [];
-  (hookFn.params || []).forEach((p, idx) => {
-    const argVal = args[idx] ? generator(args[idx]).code : (t.isAssignmentPattern(p) ? generator(p.right).code : 'null');
-    const pName = t.isIdentifier(p) ? p.name : (t.isAssignmentPattern(p) && t.isIdentifier(p.left) ? p.left.name : null);
-    if (pName) paramMap.set(pName, argVal);
-  });
-
-  const body = hookFn.body;
-  const stmts = t.isBlockStatement(body) ? body.body : [t.returnStatement(body)];
-
-  for (const stmt of stmts) {
-    if (t.isVariableDeclaration(stmt)) {
-      for (const decl of stmt.declarations) {
-        if (t.isCallExpression(decl.init)) {
-          const callee = decl.init.callee;
-          const name = t.isIdentifier(callee) ? callee.name : '';
-          if (name === 'useState' && t.isArrayPattern(decl.id)) {
-            const stateName = decl.id.elements[0] ? decl.id.elements[0].name : null;
-            const setterName = decl.id.elements[1] ? decl.id.elements[1].name : null;
-            let initVal = decl.init.arguments[0] ? generator(decl.init.arguments[0]).code : 'null';
-            if (paramMap.has(initVal)) initVal = paramMap.get(initVal);
-            if (stateName) {
-              dataObj[stateName] = initVal;
-              if (setterName) setterToState.set(setterName, stateName);
-            }
-          }
-          if (name === 'useRef' && t.isIdentifier(decl.id)) {
-            refsSet.add(decl.id.name);
-          }
-        }
-        if (t.isIdentifier(decl.id) && (t.isArrowFunctionExpression(decl.init) || t.isFunctionExpression(decl.init))) {
-          const funcName = decl.id.name;
-          methodsObj[funcName] = formatMethodFromFn(funcName, decl.init, setterToState, dataObj, propsObj, refsSet);
-        }
-      }
-    }
-    if (t.isFunctionDeclaration(stmt)) {
-      const funcName = stmt.id.name;
-      methodsObj[funcName] = formatMethodFromFn(funcName, stmt, setterToState, dataObj, propsObj, refsSet);
-    }
-    if (t.isExpressionStatement(stmt) && t.isCallExpression(stmt.expression)) {
-      const callee = stmt.expression.callee;
-      const name = t.isIdentifier(callee) ? callee.name : '';
-      if (name === 'useEffect') {
-        const effectFn = stmt.expression.arguments[0];
-        if (t.isArrowFunctionExpression(effectFn) || t.isFunctionExpression(effectFn)) {
-          lifecyclesObj.onInit = generator(effectFn.body).code;
-        }
-      }
-    }
-  }
-}
-
-function processFunctionalComponent(fnNode, warnings, ast) {
-  let templateXml = null;
-  let styleCss = '';
-  const propsObj = {};
-  const dataObj = {};
-  const methodsObj = {};
-  const lifecyclesObj = {};
-  const setterToState = new Map();
-  const refsSet = new Set();
-
-  if (fnNode.params && fnNode.params.length > 0) {
-    const p0 = fnNode.params[0];
-    if (t.isObjectPattern(p0)) {
-      for (const prop of p0.properties) {
-        if (t.isObjectProperty(prop)) {
-          const name = t.isIdentifier(prop.key) ? prop.key.name : prop.key.value;
-          if (t.isAssignmentPattern(prop.value)) {
-            propsObj[name] = { default: generator(prop.value.right).code };
-          } else {
-            propsObj[name] = { default: "''" };
-          }
-        }
-      }
-    }
-  }
-
-  const body = fnNode.body;
-  const stmts = t.isBlockStatement(body) ? body.body : [t.returnStatement(body)];
-
-  for (const stmt of stmts) {
-    if (t.isVariableDeclaration(stmt)) {
-      for (const decl of stmt.declarations) {
-        if (t.isCallExpression(decl.init)) {
-          const callee = decl.init.callee;
-          const name = t.isIdentifier(callee) ? callee.name : (t.isMemberExpression(callee) ? callee.property.name : '');
-          if (name === 'useState' && t.isArrayPattern(decl.id)) {
-            const stateName = decl.id.elements[0] ? decl.id.elements[0].name : null;
-            const setterName = decl.id.elements[1] ? decl.id.elements[1].name : null;
-            const initArg = decl.init.arguments[0];
-            const initVal = initArg ? generator(initArg).code : 'null';
-            if (stateName) {
-              dataObj[stateName] = initVal;
-              if (setterName) setterToState.set(setterName, stateName);
-            }
-            continue;
-          }
-          if (name === 'useRef' && t.isIdentifier(decl.id)) {
-            refsSet.add(decl.id.name);
-            continue;
-          }
-          if (/^use[A-Z]/.test(name) && name !== 'useState' && name !== 'useEffect' && name !== 'useRef' && ast) {
-            const hookFn = findHookInAst(ast, name);
-            if (hookFn) {
-              inlineHookIntoComponent(hookFn, decl, dataObj, setterToState, methodsObj, lifecyclesObj, propsObj, refsSet);
-            }
-            continue;
-          }
-        }
-        if (t.isIdentifier(decl.id) && (t.isArrowFunctionExpression(decl.init) || t.isFunctionExpression(decl.init))) {
-          const funcName = decl.id.name;
-          methodsObj[funcName] = formatMethodFromFn(funcName, decl.init, setterToState, dataObj, propsObj, refsSet);
-        } else if (t.isIdentifier(decl.id) && decl.id.name === 'style') {
-          if (t.isStringLiteral(decl.init)) styleCss = decl.init.value;
-          else if (t.isTemplateLiteral(decl.init)) styleCss = decl.init.quasis.map((q) => q.value.cooked).join('');
-        } else if (t.isIdentifier(decl.id) && decl.init) {
-          const varName = decl.id.name;
-          if (!dataObj[varName] && !methodsObj[varName] && !refsSet.has(varName)) {
-            dataObj[varName] = generator(decl.init).code;
-          }
-        }
-      }
-    }
-
-    if (t.isFunctionDeclaration(stmt)) {
-      const funcName = stmt.id.name;
-      methodsObj[funcName] = formatMethodFromFn(funcName, stmt, setterToState, dataObj, propsObj, refsSet);
-    }
-
-    if (t.isExpressionStatement(stmt) && t.isCallExpression(stmt.expression)) {
-      const callee = stmt.expression.callee;
-      const name = t.isIdentifier(callee) ? callee.name : (t.isMemberExpression(callee) ? callee.property.name : '');
-      if (name === 'useEffect') {
-        const effectFn = stmt.expression.arguments[0];
-        if (t.isArrowFunctionExpression(effectFn) || t.isFunctionExpression(effectFn)) {
-          const bodyCode = generator(effectFn.body).code;
-          lifecyclesObj.onInit = bodyCode;
-        }
-      } else if (/^use[A-Z]/.test(name) && name !== 'useState' && name !== 'useRef' && ast) {
-        const hookFn = findHookInAst(ast, name);
-        if (hookFn) {
-          inlineHookIntoComponent(hookFn, { init: stmt.expression }, dataObj, setterToState, methodsObj, lifecyclesObj, propsObj, refsSet);
-        }
-      }
-    }
-
-    if (t.isReturnStatement(stmt)) {
-      const arg = stmt.argument;
-      if (t.isJSXElement(arg)) templateXml = serializeJSXElement(arg, warnings);
-      else if (t.isJSXFragment(arg)) templateXml = serializeJSXFragment(arg, warnings);
-    }
-  }
-
-  const scriptParts = [];
-  if (Object.keys(propsObj).length > 0) {
-    const propsStr = Object.entries(propsObj)
-      .map(([k, v]) => `${k}: { default: ${v.default} }`)
-      .join(', ');
-    scriptParts.push(`  props: { ${propsStr} },`);
-  }
-  if (Object.keys(dataObj).length > 0) {
-    const dataStr = Object.entries(dataObj)
-      .map(([k, v]) => `${k}: ${v}`)
-      .join(', ');
-    scriptParts.push(`  data: { ${dataStr} },`);
-  }
-  if (Object.keys(methodsObj).length > 0) {
-    const mStrs = Object.values(methodsObj).map((m) => `  ${m},`);
-    scriptParts.push(mStrs.join('\n'));
-  }
-  for (const [lcName, lcBody] of Object.entries(lifecyclesObj)) {
-    scriptParts.push(`  ${lcName}() ${lcBody},`);
-  }
-
-  const scriptPropLines = `export default {\n${scriptParts.join('\n')}\n}`;
-  return { templateXml, styleCss, scriptPropLines };
-}
-
-function buildUxContent(source, filename) {
-  _templateImports = [];
-
+function buildUxContent(source, filename, options = {}) {
   let ast;
   try {
     ast = parser.parse(source, {
@@ -970,81 +2134,101 @@ function buildUxContent(source, filename) {
       const lines = source.split('\n');
       const ctxLine = lines[loc.line - 1] || '';
       throw new Error(
-        `[vela-ux] Error de sintaxis en ${filename}:${loc.line}:${loc.column}\n` +
+        `[vela-ux] Syntax error in ${filename}:${loc.line}:${loc.column}\n` +
         `  ${ctxLine}\n` +
         `  ${'~'.repeat(Math.max(1, loc.column - 1))}^\n` +
         `  ${e.message}`
       );
     }
-    throw new Error(`[vela-ux] Error al parsear ${filename}: ${e.message}`);
+    throw new Error(`[vela-ux] Failed to parse ${filename}: ${e.message}`);
   }
 
-  const astLineMap = extractASTLineMap(ast);
+  const ctx = createContext(filename, options);
 
-  const warnings = [];
-  const compImports = new Map();
-  const jsImportLines = [];
+  // Prop types come from TS annotations, so read them before stripping types.
+  let propTypes = new Map();
+  for (const stmt of ast.program.body) {
+    if (!t.isExportDefaultDeclaration(stmt)) continue;
+    let fn = stmt.declaration;
+    if (t.isIdentifier(fn)) fn = findHookInAst(ast, fn.name);
+    if (fn && (t.isFunctionDeclaration(fn) || isFunctionNode(fn))) propTypes = collectPropTypes(ast, fn);
+  }
+  stripTypes(ast);
+  ctx.moduleBindings = collectModuleBindings(ast);
+
+  const importNodes = [];
+  for (const stmt of ast.program.body) {
+    if (!t.isImportDeclaration(stmt)) continue;
+    const src = stmt.source.value;
+    if (KOVO_MODULES.has(src)) continue;
+    const isRelativeOrComp = /^\.\.?\//.test(src) || /\.(ux|tsx?)$/.test(src);
+    if (isRelativeOrComp) {
+      for (const spec of stmt.specifiers) {
+        if (t.isImportDefaultSpecifier(spec) && /^[A-Z]/.test(spec.local.name)) {
+          ctx.componentRegistry.set(spec.local.name, { localName: spec.local.name, src });
+        }
+      }
+    }
+    importNodes.push(stmt);
+  }
+
+  const warnings = ctx.warnings;
   const helperLines = [];
+  let hoistedLines = [];
   let templateXml = null;
   let styleCss = '';
+  let styleLang = null;
   let scriptPropLines = null;
-  let computedPropLines = null;
-  let hasComputed = false;
   let templateSourceLine = 0;
   let styleSourceLine = 0;
   let exportDefaultLine = 0;
+  let componentPathNode = null;
 
   traverse(ast, {
-    ImportDeclaration(path) {
-      const src = path.node.source.value;
-      if (src === 'kovo-ux' || src === 'kovo' || src === 'vela-jsx' || src === 'react') {
-        return;
-      }
-      const isRelativeOrComp = /^(\.|\.\.\/)/.test(src) || /\.(ux|tsx?)$/.test(src);
-      if (isRelativeOrComp) {
-        for (const spec of path.node.specifiers) {
-          if (t.isImportDefaultSpecifier(spec) && /^[A-Z]/.test(spec.local.name)) {
-            compImports.set(spec.local.name, {
-              localName: spec.local.name,
-              src: src,
-            });
-          }
-        }
-      }
-      jsImportLines.push(generator(path.node).code);
-      _componentRegistry = compImports;
-    },
-    ExportNamedDeclaration(path) {
-      const decl = path.node.declaration;
+    ExportNamedDeclaration(p) {
+      const decl = p.node.declaration;
       if (t.isVariableDeclaration(decl)) {
         for (const vdecl of decl.declarations) {
-          if (t.isIdentifier(vdecl.id) && vdecl.id.name === 'style') {
-            if (t.isStringLiteral(vdecl.init)) styleCss = vdecl.init.value;
-            else if (t.isTemplateLiteral(vdecl.init)) styleCss = vdecl.init.quasis.map((q) => q.value.cooked).join('');
+          if (t.isIdentifier(vdecl.id, { name: 'style' })) {
+            const css = cssFromNode(vdecl.init);
+            if (css !== null) {
+              styleCss = css;
+              styleSourceLine = getLineNumber(vdecl.init);
+            }
+          }
+          if (t.isIdentifier(vdecl.id, { name: 'styleLang' }) && t.isStringLiteral(vdecl.init)) {
+            styleLang = vdecl.init.value;
           }
         }
       }
     },
-    VariableDeclaration(path) {
-      if (path.parentPath && path.parentPath.isProgram()) {
-        for (const vdecl of path.node.declarations) {
-          if (t.isIdentifier(vdecl.id) && vdecl.id.name === 'style') {
-            if (t.isStringLiteral(vdecl.init)) styleCss = vdecl.init.value;
-            else if (t.isTemplateLiteral(vdecl.init)) styleCss = vdecl.init.quasis.map((q) => q.value.cooked).join('');
+    VariableDeclaration(p) {
+      if (p.parentPath && p.parentPath.isProgram()) {
+        for (const vdecl of p.node.declarations) {
+          if (t.isIdentifier(vdecl.id, { name: 'style' })) {
+            const css = cssFromNode(vdecl.init);
+            if (css !== null) styleCss = css;
           }
         }
       }
     },
-    ExportDefaultDeclaration(path) {
-      _componentRegistry = compImports;
-      exportDefaultLine = getLineNumber(path.node);
-      const decl = path.node.declaration;
+    ExportDefaultDeclaration(p) {
+      exportDefaultLine = getLineNumber(p.node);
+      const declPath = p.get('declaration');
+      const decl = declPath.node;
 
-      if (t.isFunctionDeclaration(decl) || t.isFunctionExpression(decl) || t.isArrowFunctionExpression(decl)) {
-        const res = processFunctionalComponent(decl, warnings, ast);
+      let fnPath = null;
+      if (declPath.isFunction()) fnPath = declPath;
+      else if (t.isIdentifier(decl)) fnPath = resolveExportedFunction(p.parentPath, decl);
+      if (fnPath) {
+        componentPathNode = fnPath.parentPath.isVariableDeclarator() ? fnPath.parent : null;
+        const res = processFunctionalComponent(fnPath, ctx, ast, propTypes);
         if (res.templateXml) templateXml = res.templateXml;
         if (res.styleCss) styleCss = res.styleCss;
+        templateSourceLine = getLineNumber(fnPath.node);
         scriptPropLines = res.scriptPropLines;
+        hoistedLines = res.hoisted;
+        p.skip();
         return;
       }
 
@@ -1058,15 +2242,15 @@ function buildUxContent(source, filename) {
       for (const prop of decl.properties) {
         if (t.isSpreadElement(prop)) continue;
         if (!t.isObjectProperty(prop) && !t.isObjectMethod(prop)) continue;
-        const key = t.isIdentifier(prop.key) ? prop.key.name : prop.key.value;
+        const key = propKeyName(prop.key);
         propByName[key] = prop;
       }
 
       if (propByName.template) {
         const tv = propByName.template.value;
         templateSourceLine = getLineNumber(tv);
-        if (t.isJSXElement(tv)) templateXml = serializeJSXElement(tv, warnings);
-        else if (t.isJSXFragment(tv)) templateXml = serializeJSXFragment(tv, warnings);
+        if (t.isJSXElement(tv)) templateXml = serializeJSXElement(tv, ctx);
+        else if (t.isJSXFragment(tv)) templateXml = serializeRootFragment(tv, ctx);
         else {
           const got = exprSource(tv).substring(0, 40);
           throw new Error(
@@ -1078,31 +2262,24 @@ function buildUxContent(source, filename) {
       if (propByName.style) {
         const sv = propByName.style.value;
         styleSourceLine = getLineNumber(sv);
-        if (t.isStringLiteral(sv)) styleCss = sv.value;
-        else if (t.isTemplateLiteral(sv)) {
-          styleCss = sv.quasis.map((q) => q.value.cooked).join('');
-        } else {
+        const css = cssFromNode(sv);
+        if (css === null) {
           const got = exprSource(sv).substring(0, 40);
           throw new Error(
             `[vela-ux] style must be a string or template literal at ${filename}, got: ${got}`
           );
         }
+        styleCss = css;
       }
 
       if (propByName.computed) {
-        hasComputed = true;
         const cv = propByName.computed;
-        if (t.isObjectProperty(cv)) {
-          const ce = cv.value;
-          if (t.isObjectExpression(ce)) {
-            for (const prop of ce.properties) {
-              if (t.isObjectMethod(prop) || t.isObjectProperty(prop)) {
-                const k = t.isIdentifier(prop.key) ? prop.key.name : prop.key.value;
-                if (!t.isFunctionExpression(prop.value) && !t.isObjectMethod(prop) && !t.isArrowFunctionExpression(prop.value)) {
-                  warnings.push(
-                    `Computed property "${k}" should be a function (${filename})`
-                  );
-                }
+        if (t.isObjectProperty(cv) && t.isObjectExpression(cv.value)) {
+          for (const prop of cv.value.properties) {
+            if (t.isObjectMethod(prop) || t.isObjectProperty(prop)) {
+              const k = propKeyName(prop.key);
+              if (!t.isObjectMethod(prop) && !isFunctionNode(prop.value) && !t.isObjectExpression(prop.value)) {
+                warnings.push(`Computed property "${k}" should be a function (${filename})`);
               }
             }
           }
@@ -1129,33 +2306,45 @@ function buildUxContent(source, filename) {
     },
   });
 
-  traverse(ast, {
-    FunctionDeclaration(path) {
-      if (path.parent.type === 'Program') {
-        const fnName = path.node.id ? path.node.id.name : '';
-        if (/^use[A-Z]/.test(fnName)) return;
-        if (/^[A-Z]/.test(fnName)) return;
-        helperLines.push(generator(path.node).code);
-      }
-    },
-    VariableDeclaration(path) {
-      if (path.parent.type === 'Program') {
-        const isStyle = path.node.declarations.some(
-          (d) => t.isIdentifier(d.id) && d.id.name === 'style'
-        );
-        if (isStyle) return;
-        helperLines.push(generator(path.node).code);
-      }
-    },
-  });
+  for (const stmt of ast.program.body) {
+    if (t.isFunctionDeclaration(stmt)) {
+      const fnName = stmt.id ? stmt.id.name : '';
+      if (/^use[A-Z]/.test(fnName) || /^[A-Z]/.test(fnName)) continue;
+      helperLines.push(generator(stmt).code);
+    } else if (t.isVariableDeclaration(stmt)) {
+      const skip = stmt.declarations.some((d) =>
+        t.isIdentifier(d.id) && (
+          d.id.name === 'style' ||
+          d === componentPathNode ||
+          (isFunctionNode(d.init) && (/^use[A-Z]/.test(d.id.name) || /^[A-Z]/.test(d.id.name)))
+        ));
+      if (!skip) helperLines.push(generator(stmt).code);
+    }
+  }
+  if (ctx.usesKovoArgs) helperLines.push(KOVO_ARGS_HELPER);
 
   if (!templateXml && !scriptPropLines) {
     throw new Error(`[vela-ux] No \`template\` property found in export default of ${filename}.`);
   }
 
+  // Component imports are template-level (<import>), not script imports.
+  const isComponentImport = (imp) => imp.specifiers.length > 0 && imp.specifiers.every((s) =>
+    ctx.componentRegistry.has(s.local.name) && (
+      ctx.usedComponents.has(s.local.name) ||
+      /\.(ux|tsx)$/.test(imp.source.value) ||
+      resolveComponentFile(imp.source.value, ctx)));
+  const jsImportLines = importNodes
+    .filter((imp) => !isComponentImport(imp))
+    .map((imp) => generator(imp).code);
+
+  if (ctx.inlineStyles.length) {
+    styleCss = [styleCss, ...ctx.inlineStyles].filter((s) => s.trim()).join('\n');
+  }
+  if (styleCss.trim() && !styleLang) lintCss(styleCss, ctx);
+
   const parts = [];
   if (templateXml) {
-    for (const imp of _templateImports) {
+    for (const imp of ctx.templateImports) {
       let srcAttr = imp.src;
       if (!/\.ux$/.test(srcAttr)) {
         srcAttr = srcAttr.replace(/\.tsx?$/, '') + '.ux';
@@ -1168,23 +2357,23 @@ function buildUxContent(source, filename) {
   }
   if (styleCss.trim()) {
     parts.push('');
-    parts.push('<style>');
+    parts.push(styleLang ? `<style lang="${styleLang}">` : '<style>');
     parts.push(styleCss);
     parts.push('</style>');
   }
   parts.push('');
   parts.push('<script>');
   if (jsImportLines.length) parts.push(jsImportLines.join('\n'));
-  if (helperLines.length) {
+  const moduleCode = [...helperLines, ...hoistedLines];
+  if (moduleCode.length) {
     if (jsImportLines.length) parts.push('');
-    parts.push(helperLines.join('\n\n'));
+    parts.push(moduleCode.join('\n\n'));
   }
-  if (jsImportLines.length || helperLines.length) parts.push('');
+  if (jsImportLines.length || moduleCode.length) parts.push('');
   if (scriptPropLines) parts.push(scriptPropLines);
   parts.push('</script>');
 
   const content = parts.join('\n');
-  const contentLines = content.split('\n');
   const sectionRanges = [];
   let uxLineCursor = 1;
   const sectionHeaders = {
@@ -1196,7 +2385,8 @@ function buildUxContent(source, filename) {
   for (let i = 0; i < parts.length; i++) {
     const pLines = parts[i].split('\n');
     for (const [type, h] of Object.entries(sectionHeaders)) {
-      if (parts[i] === h.startTag) {
+      const isStart = parts[i] === h.startTag || (type === 'style' && /^<style( lang="[^"]+")?>$/.test(parts[i]));
+      if (isStart) {
         currentSection = { type, tsxSrc: h.tsxSrc, startLine: uxLineCursor };
       }
       if (parts[i] === h.endTag && currentSection) {
@@ -1231,26 +2421,26 @@ module.exports = function () {
     name: 'vela-ux',
     visitor: {
       Program: {
-        exit(path, state) {
+        exit(programPath, state) {
           const filename = state.filename || '<unknown>';
-          if (/\.ux$/i.test(filename) || filename.includes('node_modules') || filename.includes('\\src\\') || filename.includes('/src/')) {
+          const normalized = filename.replace(/\\/g, '/');
+          if (/\.ux$/i.test(filename) || normalized.includes('/node_modules/') || !/\.(t|j)sx$/i.test(filename)) {
             return;
           }
           const source = state.file.code;
-          const { content, warnings } = buildUxContent(source, filename);
+          const { content, warnings } = buildUxContent(source, filename, state.opts || {});
           for (const w of warnings) {
             // eslint-disable-next-line no-console
             console.warn(`[vela-ux] ${filename}: ${w}`);
           }
           // Replace the program with a single string literal export so the
           // build script can read it and write the .ux file.
-          const str = t.stringLiteral(content);
-          path.replaceWith(
+          programPath.replaceWith(
             t.program([
               t.expressionStatement(
                 t.callExpression(t.identifier('__vela_write_ux__'), [
                   t.stringLiteral(filename),
-                  str,
+                  t.stringLiteral(content),
                 ]),
               ),
             ]),

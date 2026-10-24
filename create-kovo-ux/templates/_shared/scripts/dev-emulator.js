@@ -87,14 +87,10 @@ async function main() {
   // Require AIoT toolkit VelaAvdUtils
   let VelaAvdUtils;
   try {
-    VelaAvdUtils = require('d:/Project/SMARTWATCH/xiaomistuff-hello-world/wachat/node_modules/aiot-toolkit/lib/utils/VelaAvdUtils').default;
-  } catch (e) {
-    try {
-      VelaAvdUtils = require('aiot-toolkit/lib/utils/VelaAvdUtils').default;
-    } catch (err) {
-      console.error('\x1b[31m%s\x1b[0m', `❌ Could not load AIoT Toolkit emulator modules: ${err.message}`);
-      process.exit(1);
-    }
+    VelaAvdUtils = require(require.resolve('aiot-toolkit/lib/utils/VelaAvdUtils', { paths: [ROOT] })).default;
+  } catch (err) {
+    console.error('\x1b[31m%s\x1b[0m', `❌ Could not load AIoT Toolkit emulator modules (is aiot-toolkit installed?): ${err.message}`);
+    process.exit(1);
   }
 
   // Ensure emulator & VVD config are ready
@@ -110,10 +106,10 @@ async function main() {
 
   try {
     // Run aiot build to get initial RPK
-    execSync('& "d:\\Project\\SMARTWATCH\\xiaomistuff-hello-world\\wachat\\node_modules\\.bin\\aiot.cmd" build --enable-custom-component', {
+    const aiotBin = require.resolve('aiot-toolkit/lib/bin.js', { paths: [ROOT] });
+    execSync(`"${process.execPath}" "${aiotBin}" build --enable-custom-component`, {
       cwd: ROOT,
       stdio: 'inherit',
-      shell: 'powershell.exe'
     });
 
     const manifestPath = path.join(ROOT, 'src', 'manifest.json');
@@ -134,7 +130,10 @@ async function main() {
     });
 
     const emulatorInstance = startRes.emulatorInstance;
-    if (emulatorInstance && fs.existsSync(rpkPath)) {
+    if (!rpkPath) {
+      console.warn('\x1b[33m%s\x1b[0m', '⚠ No .rpk found in dist/ — the aiot build did not produce a package.');
+    }
+    if (emulatorInstance && rpkPath) {
       const targetPath = await emulatorInstance.pushRpk(rpkPath, packageName);
       await emulatorInstance.install(targetPath, { packageName });
       await emulatorInstance.startApp(packageName);

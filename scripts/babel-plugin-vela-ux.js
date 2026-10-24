@@ -2075,9 +2075,15 @@ function isStaticInit(node, model) {
   return ![...used].some((n) => model.memberNames.has(n));
 }
 
-/** `[a, obj.b]` deps -> ['a', 'obj.b'] watch paths. */
+/**
+ * `[a, obj.b]` deps -> ['a', 'obj.b'] watch paths. Expression deps such as
+ * `${API}/${id}` (common after inlining `useFetch(url)`) watch every
+ * reactive value they read.
+ */
 function depPaths(deps, model, ctx) {
   const paths = [];
+  const watchable = (name) => model.memberNames.has(name) && !model.methods.has(name) &&
+    !model.setters.has(name) && !model.refs.has(name) && !model.eventProps.has(name);
   for (const el of deps.elements) {
     let n = el;
     const parts = [];
@@ -2092,10 +2098,14 @@ function depPaths(deps, model, ctx) {
     } else if (t.isIdentifier(n) && (model.methods.has(n.name) || model.setters.has(n.name))) {
       continue;
     } else {
-      ctx.warn(`useEffect dependency "${exprSource(el)}" cannot be watched; only state, props and computed values can.`);
+      const reads = [...referencedNames(el)].filter(watchable);
+      if (reads.length) paths.push(...reads);
+      else if (!isStaticInit(el, model)) {
+        ctx.warn(`useEffect dependency "${exprSource(el)}" cannot be watched; only state, props and computed values can.`);
+      }
     }
   }
-  return paths;
+  return [...new Set(paths)];
 }
 
 function hasTopLevelReturn(block) {

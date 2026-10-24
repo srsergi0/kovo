@@ -97,4 +97,5 @@ Use `export const styleLang = 'less'` (or `'scss'`) to emit `<style lang="...">`
 - **No re-render cycle.** A component body runs once at compile time. `useEffect` without a dependency array runs once (Kovo warns). Use `[deps]` to re-run through `$watch`.
 - **Only state, props and computed values can be watched.** Other dependencies are ignored with a warning.
 - **Event payloads.** Kovo children send `{ kovoArgs: [...] }`. Hand-written `.ux` children that `$emit('x', payload)` still work: the parent receives `payload` as its single argument.
+- **Networking (`@system.fetch`) works with every React-style pattern** — callbacks (`function` or arrow), `.then()`, `async`/`await` and a `useFetch(url)` hook with `[url]` deps (verified on the emulator against a live API). Two Vela specifics: declare `{ "name": "system.fetch" }` in `manifest.json` features, and with promises/`await` the response is wrapped once more, so the body is at `res.data.data` (callbacks get it at `res.data`).
 - **Pages have no props.** Router params arrive as page state (`protected`).

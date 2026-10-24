@@ -313,6 +313,25 @@ describe('useEffect', () => {
     assert.match(s, /this\.kovoEffect0\(\);\s*this\.\$watch\("user\.id", "kovoEffect0"\);/);
   });
 
+  test('expression dependencies watch every reactive value they read (useFetch(url) pattern)', () => {
+    const { content, warnings } = transform(`
+      import { useState, useEffect } from 'kovo-ux';
+      const API = 'https://example.com';
+      function useFetch(url) {
+        const [data, setData] = useState(null);
+        useEffect(() => { load(url, setData); }, [url]);
+        return { data };
+      }
+      export default function P() {
+        const [id, setId] = useState(1);
+        const { data } = useFetch(\`\${API}/todos/\${id}\`);
+        return <text>{data}</text>;
+      }
+    `);
+    assert.match(script(content), /this\.\$watch\("id", "kovoEffect0"\);/);
+    assert.ok(!warnings.some((w) => /cannot be watched/.test(w)));
+  });
+
   test('effects touching DOM refs run in onReady', () => {
     const { content } = transform(`
       import { useEffect, useRef } from 'kovo-ux';

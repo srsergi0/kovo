@@ -742,7 +742,9 @@ function hoistHandler(params, body, ctx) {
 }
 
 function serializeEventHandler(name, value, ctx) {
-  const velaAttr = `@${EVENT_MAP[name]}`;
+  // Known names map explicitly; any other onFooBar becomes the lowercase Vela event @foobar
+  // (e.g. onScrollBottom -> @scrollbottom on <list>, onSwipeEnd -> @swipeend on <swiper>).
+  const velaAttr = `@${EVENT_MAP[name] || name.slice(2).toLowerCase()}`;
   if (!value) {
     throw new Error(`Event handler ${name} must have a value.`);
   }
@@ -786,7 +788,7 @@ function serializeAttribute(attr, ctx, element) {
     : attr.name.name;
   const value = attr.value;
 
-  if (EVENT_MAP[name]) return serializeEventHandler(name, value, ctx);
+  if (EVENT_MAP[name] || /^on[A-Z][a-zA-Z]*$/.test(name)) return serializeEventHandler(name, value, ctx);
 
   // `key` is consumed by the enclosing .map() (as `tid`).
   if (name === 'key') return null;
@@ -949,7 +951,8 @@ function isStaticNode(node, ctx) {
         t.isCallExpression(e)) return false;
     exprs.push(e);
   }
-  return exprs.length > 0 && exprs.every((e) => isStaticExpr(e, ctx));
+  // Literal-only bindings are already constant; only mark nodes that read variables.
+  return exprs.some((e) => referencedNames(e).size > 0) && exprs.every((e) => isStaticExpr(e, ctx));
 }
 
 function directiveAttrs(opts) {
@@ -989,6 +992,7 @@ function serializeJSXElement(node, ctx, opts = {}) {
   if (isCustomComponent(name, ctx)) {
     return serializeCustomComponent(node, name, ctx, opts);
   }
+  if (name === 'component') ctx.usesDynamicComponent = true;
 
   const hasDirective = opts.ifExpr || opts.elifExpr || opts.elseExpr;
   const element = {
@@ -1070,10 +1074,13 @@ function serializeJSXExpression(expr, ctx, parentTag) {
     return serializeConditional(expr, ctx);
   }
   if (t.isConditionalExpression(expr)) {
+    // Only branches that produce JSX make this a conditional render;
+    // `a ? 'x' : b && b.title` is a plain text value.
     const isJSX = (n) => {
       n = unwrapParens(n);
-      return t.isJSXElement(n) || t.isJSXFragment(n) || t.isConditionalExpression(n) ||
-        (t.isLogicalExpression(n) && n.operator === '&&');
+      if (t.isJSXElement(n) || t.isJSXFragment(n)) return true;
+      if (t.isConditionalExpression(n)) return isJSX(n.consequent) || isJSX(n.alternate);
+      return t.isLogicalExpression(n) && n.operator === '&&' && isJSX(n.right);
     };
     if (!isJSX(expr.consequent) && !isJSX(expr.alternate)) {
       const binding = `{{${exprToVelaBinding(expr, ctx)}}}`;
@@ -2757,6 +2764,7 @@ function buildUxContent(source, filename, options = {}) {
   // Component imports are template-level (<import>), not script imports.
   const isComponentImport = (imp) => imp.specifiers.length > 0 && imp.specifiers.every((s) =>
     ctx.componentRegistry.has(s.local.name) && (
+      ctx.usesDynamicComponent ||
       ctx.usedComponents.has(s.local.name) ||
       /\.(ux|tsx)$/.test(imp.source.value) ||
       resolveComponentFile(imp.source.value, ctx)));
@@ -2780,6 +2788,15 @@ function buildUxContent(source, filename, options = {}) {
   if (styleCss.trim() && !styleLang && ctx.isFunctionComponent && templateXml && !ctx.classesUnknown &&
       ctx.options.pruneCss !== false) {
     styleCss = pruneUnusedCss(styleCss, ctx.usedClasses);
+  }
+
+  // <component is="..."> resolves names at runtime: every imported component needs an <import>.
+  if (ctx.usesDynamicComponent) {
+    for (const [local, info] of ctx.componentRegistry) {
+      const kebab = pascalToKebab(local);
+      ctx.usedComponents.add(local);
+      if (!ctx.templateImports.some((imp) => imp.name === kebab)) ctx.templateImports.push({ name: kebab, src: info.src });
+    }
   }
 
   const parts = [];

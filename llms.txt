@@ -1,0 +1,35 @@
+# Kovo
+
+> Kovo compiles React-style TSX (function components + hooks) into native Xiaomi Vela QuickApp `.ux` files for Xiaomi/Redmi smartwatches, with zero runtime. It maps React semantics onto the Vela ViewModel (data/protected, computed, $watch, $emit, $element, lifecycles) and enforces the platform's limits (CSS subset, single root, no emoji glyphs, memory guide).
+
+Key facts for generating code: edit only `src-tsx/`; one root element; text only inside `<text>`; no early returns; flexbox only; `.class`/`#id`/`tag` selectors only; no emoji; declare `@system.*` features in `manifest.json`; `<input>` types are only button/checkbox/radio; router params arrive as strings into page state of the same name; a change is done only when `bun run build` shows no `[kovo]` warnings and `bun run aiot:build` succeeds without `🟠` lines.
+
+## Agent guides
+
+- [App guide (AGENTS.md of every scaffolded project)](https://github.com/srsergi0/kovo/blob/main/docs/ai/app-guide.md): rules, supported React subset, unsupported patterns and alternatives, JSX/CSS rules, `@system.*` APIs with manifest features, performance rules, compiler message → fix table
+- [Repository guide (AGENTS.md)](https://github.com/srsergi0/kovo/blob/main/AGENTS.md): compiler architecture, change rules, verification for contributors
+
+## Docs
+
+- [React → Vela mapping & limits](https://github.com/srsergi0/kovo/blob/main/docs/09-react-to-vela-mapping.md): every transformation the compiler performs, enforced limits, optimizations, behaviour differences from React
+- [Getting started](https://github.com/srsergi0/kovo/blob/main/docs/01-getting-started.md)
+- [Compiler architecture](https://github.com/srsergi0/kovo/blob/main/docs/02-architecture-and-compiler.md)
+- [JSX & templates](https://github.com/srsergi0/kovo/blob/main/docs/03-jsx-and-templates.md)
+- [State & hooks](https://github.com/srsergi0/kovo/blob/main/docs/04-state-and-hooks.md)
+- [Styling](https://github.com/srsergi0/kovo/blob/main/docs/05-styling-and-design-system.md)
+- [System APIs & networking](https://github.com/srsergi0/kovo/blob/main/docs/06-system-apis-and-networking.md)
+- [Testing & CLI](https://github.com/srsergi0/kovo/blob/main/docs/07-testing-and-cli-tools.md)
+- [API reference & cheatsheet](https://github.com/srsergi0/kovo/blob/main/docs/08-api-reference-and-cheatsheet.md)
+- [Typings (JSX elements, hooks, @system modules)](https://github.com/srsergi0/kovo/blob/main/types/kovo.d.ts)
+
+## Official Xiaomi Vela docs
+
+- [Framework (ux files, template, style, script, lifecycle)](https://iot.mi.com/vela/quickapp/en/guide/framework/)
+- [Components](https://iot.mi.com/vela/quickapp/en/components/)
+- [APIs (@system.*)](https://iot.mi.com/vela/quickapp/en/features/)
+- [Best practices: memory, startup, business](https://iot.mi.com/vela/quickapp/en/guide/best-practice/)
+
+## Optional
+
+- [Demo app source](https://github.com/srsergi0/kovo/tree/main/src-tsx)
+- [Project templates](https://github.com/srsergi0/kovo/tree/main/create-kovo-ux/templates)

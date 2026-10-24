@@ -23,6 +23,7 @@
 | [07. Testing & CLI Tools](./07-testing-and-cli-tools.md) | **Test Suite & Hardware Deployment** | Running `bun run test` (250+ edge case tests), zero-config emulator auto-patching, and QR code deployment to physical watches. |
 | [08. API Reference & Cheatsheet](./08-api-reference-and-cheatsheet.md) | **Reference & Troubleshooting** | Complete API cheat sheet, compiler flags, and solutions to common pitfalls (`need a array`, VM method binding, CDP debugger panics). |
 | [09. React → Vela Mapping & Limits](./09-react-to-vela-mapping.md) | **Compiler Semantics** | How hooks, effects, events and JSX map onto native Vela features, compile-time component inlining, and the platform limits Kovo enforces. |
+| [AI Agent App Guide](./ai/app-guide.md) | **For AI coding agents** | The `AGENTS.md` shipped in every project: rules, supported/unsupported patterns, APIs, performance rules and compiler message fixes. |
 
 ---
 

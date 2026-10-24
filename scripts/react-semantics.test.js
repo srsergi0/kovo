@@ -658,6 +658,19 @@ describe('Event handlers', () => {
     assert.match(script(content), /kovoHandler0\(i, x\) \{\s*this\.sel = x \+ i;/);
   });
 
+  test('any onFooBar on a native element becomes @foobar', () => {
+    const { content } = transform(`
+      export default function P() {
+        function more() {}
+        function idx(e) {}
+        return <div><list onScrollBottom={more}><list-item type="row"><text>a</text></list-item></list><swiper onSwipeEnd={idx} /></div>;
+      }
+    `);
+    const tpl = template(content);
+    assert.match(tpl, /<list @scrollbottom="more">/);
+    assert.match(tpl, /<swiper @swipeend="idx"\/>/);
+  });
+
   test('(e) => method(e) binds the method directly (Vela appends the event)', () => {
     const { content } = transform(`
       export default function P() {
@@ -768,6 +781,22 @@ describe('Component inlining', () => {
     assert.match(content, /<import name="opaque" src="\.\/components\/Opaque\.ux"><\/import>/);
   });
 
+  test('<component is> imports every imported component', () => {
+    const { content } = transform(`
+      import { useState } from 'kovo-ux';
+      import Badge from './components/Badge';
+      import Counter from './components/Counter';
+      export default function Tabs() {
+        const [tab, setTab] = useState('badge');
+        return <div><component is={tab} /></div>;
+      }
+    `, path.join(dir, 'tabs.tsx'));
+    assert.match(content, /<import name="badge" src="\.\/components\/Badge\.ux"><\/import>/);
+    assert.match(content, /<import name="counter" src="\.\/components\/Counter\.ux"><\/import>/);
+    assert.match(template(content), /<component is="\{\{tab\}\}"\/>/);
+    assert.doesNotMatch(script(content), /import Badge|import Counter/);
+  });
+
   test('options.inline=false disables inlining', () => {
     const { content } = transform(page(`<div><Badge /></div>`), path.join(dir, 'home.tsx'), { inline: false });
     assert.match(content, /<import name="badge"/);
@@ -868,6 +897,16 @@ describe('Vela optimizations', () => {
       '<image src={`/common/${type}.png`} />',
     );
     assert.match(template(content), /<image src="\{\{'\/common\/' \+ type \+ '\.png'\}\}"\/>/);
+  });
+
+  test('a text ternary with a && branch is a value, not a conditional render', () => {
+    const { content } = comp(
+      'const [loading, setLoading] = useState(true); const [post, setPost] = useState(null);',
+      "<scroll scroll-y={true}><text>{loading ? 'wait' : post && post.title}</text></scroll>",
+    );
+    const tpl = template(content);
+    assert.match(tpl, /<text>\{\{loading \? 'wait' : post && post\.title\}\}<\/text>/);
+    assert.match(tpl, /<scroll scroll-y="true">/);
   });
 
   test('setInterval in an effect without cleanup warns', () => {

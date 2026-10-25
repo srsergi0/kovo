@@ -33,14 +33,11 @@ function renderCode(pre) {
 document.querySelectorAll('pre[data-src]').forEach(renderCode);
 
 // ---------- hero title: split into characters ----------
-document.querySelectorAll('.title .line').forEach((line) => {
+document.querySelectorAll('.title .txt').forEach((line) => {
   line.innerHTML = line.textContent.split(' ').map((word) =>
     `<span style="display:inline-block;white-space:nowrap">${[...word].map((c) => `<span class="ch">${esc(c)}</span>`).join('')}</span>`,
   ).join(' ');
 });
-// one gradient across the accent line: each glyph shows its slice of it
-const accent = [...document.querySelectorAll('.title .accent .ch')];
-accent.forEach((ch, i) => { ch.style.backgroundPosition = `${(i / Math.max(1, accent.length - 1)) * 100}% 0`; });
 
 // ---------- 3D ----------
 let scene = null;
@@ -76,7 +73,7 @@ sections.forEach((s, i) => {
 });
 setActive(0);
 
-gsap.to('.progress span', { scaleX: 1, ease: 'none', scrollTrigger: { start: 0, end: 'max', scrub: 0.3 } });
+gsap.to('.progress span', { scaleY: 1, ease: 'none', scrollTrigger: { start: 0, end: 'max', scrub: 0.3 } });
 
 // ---------- magnet scroll: snap to section edges when close ----------
 ScrollTrigger.create({
@@ -112,7 +109,7 @@ let mm = null;
 const worldPerPx = (z = 0) => (2 * Math.tan((35 / 2) * Math.PI / 180) * (8 - z)) / window.innerHeight;
 // Pose that centres the watch on a section's .slot column, sized to fit it.
 function slotPose(section, extra) {
-  const slot = section.querySelector('.slot');
+  const slot = section.querySelector('.slot, .hero-slot');
   const r = slot.getBoundingClientRect();
   const k = worldPerPx(extra.z || 0);
   const cx = r.left + r.width / 2 - window.innerWidth / 2;
@@ -130,14 +127,14 @@ function setupRig() {
   const S = (id, extra) => slotPose(document.getElementById(id), extra);
   // one pose per section, in order
   const poses = D ? [
-    { x: 1.9, y: -0.05, z: 0, rx: 0.15, ry: -0.5, rz: 0, s: 1, morph: 0, spin: 0 },
+    S('hero', { z: 0, rx: 0.15, ry: -0.5, rz: 0, morph: 0, spin: 0 }),
     S('write', { z: 0, rx: 0.1, ry: 0.35, rz: 0.04, morph: 0, spin: 0 }),
     { ...S('compile', { z: 0, rx: 0, ry: 0, rz: 0, morph: 0, spin: Math.PI * 2 }), s: 0.42 },
     S('hooks', { z: 0, rx: 0.2, ry: -0.35, rz: -0.05, morph: 0, spin: Math.PI * 2 }),
     S('fetch', { z: 0, rx: 0.05, ry: 0.3, rz: 0, morph: 0, spin: Math.PI * 4 }),
-    { x: 5.4, y: -1.9, z: -2, rx: 0.4, ry: -0.9, rz: 0.5, s: 1.3, morph: 0, spin: Math.PI * 4 },
+    { x: 4.1, y: 1.55, z: 0, rx: 0.3, ry: -0.6, rz: 0.2, s: 0.5, morph: 0, spin: Math.PI * 4 },
     S('sim', { z: 0, rx: 0.12, ry: -0.45, rz: 0, morph: 1, spin: Math.PI * 4 }),
-    { x: -4.8, y: -1.4, z: -2, rx: 0.3, ry: 0.9, rz: -0.4, s: 1.3, morph: 0, spin: Math.PI * 6 },
+    { x: 4.1, y: 1.55, z: 0, rx: 0.3, ry: -0.6, rz: -0.1, s: 0.5, morph: 0, spin: Math.PI * 6 },
   ] : [
     { x: 0, y: 1.25, z: 0, rx: 0.15, ry: -0.35, rz: 0, s: 0.62, morph: 0, spin: 0 },
     { x: 0, y: 1.35, z: 0, rx: 0.1, ry: 0.35, rz: 0, s: 0.55, morph: 0, spin: 0 },
@@ -169,7 +166,8 @@ const chars = gsap.utils.toArray('.title .ch');
 const intro = gsap.timeline({ defaults: { ease: 'expo.out' } });
 intro
   .from(chars, { yPercent: 120, rotateX: -80, opacity: 0, duration: 1.3, stagger: 0.028 })
-  .from('#hero .reveal', { y: 30, opacity: 0, duration: 1, stagger: 0.1 }, '-=0.9')
+  .to('.title .txt.mark', { backgroundSize: '100% 86%', duration: 0.9, ease: 'power3.inOut' }, '-=0.7')
+  .from('#hero .reveal', { y: 30, opacity: 0, duration: 1, stagger: 0.1 }, '-=0.6')
   .from(rig, { s: 0.2, ry: -4, duration: 2, ease: 'expo.out' }, 0);
 if (reduced) intro.progress(1);
 
@@ -187,7 +185,9 @@ gsap.fromTo(chars, { x: 0, y: 0, rotate: 0, opacity: 1 }, {
 // ---------- per-section reveals ----------
 sections.slice(1).forEach((s) => {
   const tl = gsap.timeline({ scrollTrigger: { trigger: s, start: 'top 65%', end: 'bottom 35%', toggleActions: 'play reverse play reverse' } });
-  tl.from(s.querySelectorAll('.reveal'), { y: 40, opacity: 0, duration: 0.8, stagger: 0.08, ease: 'power3.out' });
+  if (s.querySelector('.reveal')) tl.from(s.querySelectorAll('.reveal'), { y: 40, opacity: 0, duration: 0.8, stagger: 0.08, ease: 'power3.out' });
+  const marks = s.querySelectorAll('h2 .mark');
+  if (marks.length) tl.fromTo(marks, { backgroundSize: '0% 86%' }, { backgroundSize: '100% 86%', duration: 0.8, ease: 'power3.inOut' }, 0.35);
   s.querySelectorAll('.reveal-code').forEach((fig, k) => {
     tl.from(fig, { y: 60, rotateX: 12, opacity: 0, duration: 0.9, ease: 'power3.out', transformPerspective: 1200 }, 0.1 + k * 0.15);
     tl.fromTo(fig.querySelectorAll('.face:not(.back) .ln, pre:not(.face) .ln'), { x: -24, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: 0.5, stagger: 0.025, ease: 'power2.out', clearProps: 'opacity,visibility,transform' }, 0.3 + k * 0.15);
@@ -294,13 +294,9 @@ document.querySelectorAll('[data-copy]').forEach((btn) => btn.addEventListener('
   } catch (e) { /* clipboard blocked */ }
 }));
 
-const cursor = document.querySelector('.cursor');
-const qx = gsap.quickTo(cursor, 'x', { duration: 0.6, ease: 'power3' });
-const qy = gsap.quickTo(cursor, 'y', { duration: 0.6, ease: 'power3' });
-window.addEventListener('pointermove', (e) => { qx(e.clientX); qy(e.clientY); }, { passive: true });
 
 // magnetic buttons
-document.querySelectorAll('.btn, .cmd, .gh').forEach((el) => {
+document.querySelectorAll('.btn, .cmd').forEach((el) => {
   el.addEventListener('pointermove', (e) => {
     const r = el.getBoundingClientRect();
     gsap.to(el, { x: (e.clientX - r.left - r.width / 2) * 0.25, y: (e.clientY - r.top - r.height / 2) * 0.35, duration: 0.4, ease: 'power3.out' });

@@ -2,8 +2,8 @@
 // Each one mimics what the compiled Vela page renders for the section's snippet.
 
 const C = { bg: '#06080c', cyan: '#38bdf8', violet: '#a78bfa', orange: '#ff6a2b', green: '#4ade80', pink: '#f472b6', ink: '#e2e8f0', muted: '#64748b', btn: '#0c4a6e' };
-const FONT = (w, px) => `${w} ${px}px "Space Grotesk", system-ui, sans-serif`;
-const MONO = (px) => `500 ${px}px "JetBrains Mono", ui-monospace, monospace`;
+const FONT = (w, px) => `${w} ${px}px "IBM Plex Sans", system-ui, sans-serif`;
+const MONO = (px) => `500 ${px}px "IBM Plex Mono", ui-monospace, monospace`;
 
 function pill(ctx, x, y, w, h, r, fill) {
   ctx.beginPath();

@@ -9,7 +9,8 @@
     "babel.config.js",
     "docs/",
     "AGENTS.md",
-    "llms.txt"
+    "llms.txt",
+    "simulator/"
   ],
   "keywords": [
     "xiaomi",
@@ -32,7 +33,7 @@
     "url": "https://github.com/srsergi0/kovo/issues"
   },
   "scripts": {
-    "test": "node --test scripts/babel-plugin-vela-ux.test.js scripts/hpd.test.js scripts/react-semantics.test.js scripts/build-jsx.test.js scripts/template-sync.test.js",
+    "test": "node --test scripts/babel-plugin-vela-ux.test.js scripts/hpd.test.js scripts/react-semantics.test.js scripts/build-jsx.test.js scripts/template-sync.test.js scripts/simulator.test.js",
     "dev": "node scripts/dev.js",
     "dev:emulator": "node scripts/dev-emulator.js",
     "build:copy": "node scripts/copy-static.js",
@@ -42,7 +43,8 @@
     "preview": "node scripts/preview.js",
     "clean": "node -e \"require('fs').rmSync('src',{recursive:true,force:true})\"",
     "sync:templates": "node scripts/sync-templates.js",
-    "release": "node scripts/release.js"
+    "release": "node scripts/release.js",
+    "sim": "node simulator/server.js"
   },
   "devDependencies": {
     "@aiot-toolkit/velasim": "^0.1.26",

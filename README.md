@@ -138,6 +138,7 @@ See the full documentation in [`docs/`](./docs/README.md):
 - [Testing & CLI Tools](./docs/07-testing-and-cli-tools.md)
 - [API Reference & Cheatsheet](./docs/08-api-reference-and-cheatsheet.md)
 - [React → Vela Mapping & Limits](./docs/09-react-to-vela-mapping.md)
+- [Browser Simulator (prototype)](./docs/10-browser-simulator.md)
 - [AI Agent App Guide](./docs/ai/app-guide.md)
 
 ---

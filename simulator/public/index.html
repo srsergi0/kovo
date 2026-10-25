@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kovo Simulator</title>
+<style>
+  :root { --bg: #0b0d12; --panel: #141821; --line: #232a36; --text: #cbd5e1; --muted: #64748b; --accent: #38bdf8; --warn: #fbbf24; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; display: flex; min-height: 100vh; }
+  #stage { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; min-width: 0; }
+  #side { width: 340px; border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; }
+  #side header { padding: 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #side h1 { font-size: 14px; margin: 0 8px 0 0; color: var(--accent); }
+  select, button { background: #0f131a; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; cursor: pointer; }
+  #route { padding: 8px 12px; color: var(--muted); border-bottom: 1px solid var(--line); font-family: ui-monospace, monospace; }
+  #log { flex: 1; overflow: auto; padding: 8px 12px; font-family: ui-monospace, monospace; font-size: 12px; }
+  #log div { padding: 2px 0; border-bottom: 1px solid #1a1f29; white-space: pre-wrap; word-break: break-word; }
+  #log .warn { color: var(--warn); }
+  #log .error { color: #f87171; }
+  #phone { padding: 8px 12px; border-top: 1px solid var(--line); display: flex; gap: 6px; }
+  #phone input { flex: 1; background: #0f131a; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  @media (max-width: 760px) { body { flex-direction: column; } #side { width: auto; border-left: 0; border-top: 1px solid var(--line); height: 45vh; } }
+
+  /* Device frame */
+  #device { position: relative; padding: 18px; background: #1b1f27; border-radius: 48px; box-shadow: 0 20px 60px #0008, inset 0 0 0 2px #2b313c; transform-origin: center; }
+  #device.circle { border-radius: 50%; }
+  #device.sim-vibrate { animation: vib .08s linear 5; }
+  @keyframes vib { 0% { translate: -2px 0 } 50% { translate: 2px 0 } 100% { translate: 0 0 } }
+  #viewport { overflow: hidden; position: relative; background: #000; }
+  #device.circle #viewport { border-radius: 50%; }
+  #device.rect #viewport { border-radius: 28px; }
+  #device.pill #viewport { border-radius: 999px; }
+  #vela-screen { position: absolute; left: 0; top: 0; transform-origin: 0 0; overflow: hidden; }
+
+  /* Vela layout defaults (zero specificity so page CSS always wins): every element is a flex container (row).
+     align-items defaults to stretch on the device (Yoga), although the docs table says flex-start. */
+  :where(#vela-screen), :where(#vela-screen *) { box-sizing: border-box; }
+  :where(#vela-screen .vela-page) { position: absolute; inset: 0; display: flex; flex-direction: column; overflow: hidden; }
+  :where(#vela-screen [data-tag]) { display: flex; flex-direction: row; align-items: stretch; position: relative; flex-shrink: 1; min-width: 0; margin: 0; padding: 0; border: 0 solid transparent; }
+  :where(#vela-screen [data-tag="text"]) { display: block; font-size: 30px; white-space: pre-wrap; flex-shrink: 0; }
+  :where(#vela-screen [data-tag="span"]) { display: inline; font-size: inherit; }
+  :where(#vela-screen [data-tag="stack"] > *) { position: absolute; left: 0; top: 0; }
+  :where(#vela-screen [data-tag="scroll"]), :where(#vela-screen [data-tag="list"]) { overflow: auto; scrollbar-width: none; }
+  :where(#vela-screen [data-tag="list"]) { flex-direction: column; }
+  :where(#vela-screen [data-tag="swiper"]) { overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+  :where(#vela-screen [data-tag="swiper"] > *) { flex: 0 0 100%; scroll-snap-align: start; }
+  :where(#vela-screen [data-tag="image"]) { object-fit: contain; }
+  :where(#vela-screen [data-tag="input"][data-type="button"]) { justify-content: center; align-items: center; font-size: 30px; color: #fff; background-color: #0d84ff; border-radius: 999px; padding: 0 24px; cursor: pointer; font-family: inherit; }
+  :where(#vela-screen [data-tag="progress"]) { height: 8px; background: #333; border-radius: 4px; overflow: hidden; }
+  :where(#vela-screen .vela-progress-fill) { display: block; width: var(--p, 0%); height: 100%; background: #0d84ff; }
+  :where(#vela-screen .vela-unsupported) { outline: 1px dashed var(--warn); color: var(--warn); font-size: 18px; }
+  :where(#vela-screen .sim-toast) { position: absolute; left: 50%; bottom: 12%; translate: -50% 0; background: #333d; color: #fff; padding: 10px 22px; border-radius: 999px; font-size: 24px; z-index: 10; display: block; }
+  #error { position: absolute; inset: 0; background: #2a0d0d; color: #fecaca; font: 12px/1.4 ui-monospace, monospace; padding: 24px; white-space: pre-wrap; overflow: auto; display: none; z-index: 20; }
+</style>
+<style id="page-style"></style>
+</head>
+<body>
+<main id="stage">
+  <div id="device">
+    <div id="viewport"><div id="vela-screen"></div><div id="error"></div></div>
+  </div>
+</main>
+<aside id="side">
+  <header>
+    <h1>Kovo Simulator</h1>
+    <select id="profile" aria-label="Device"></select>
+    <button id="back" title="router.back()">← Back</button>
+    <button id="reload" title="Reload app">Reload</button>
+  </header>
+  <div id="route">—</div>
+  <div id="log" aria-live="polite"></div>
+  <form id="phone"><input id="phone-msg" placeholder='Phone → watch (interconnect), e.g. {"cmd":"ping"}' aria-label="Message from phone"><button>Send</button></form>
+</aside>
+<script type="module" src="/sim/main.js"></script>
+</body>
+</html>

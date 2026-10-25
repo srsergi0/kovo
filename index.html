@@ -158,7 +158,7 @@
       <h2 class="reveal">Vela closes apps that use too much memory.<br>Kovo writes code that doesn't.</h2>
       <div class="stats">
         <div class="stat"><b data-count="0">0</b><span>KB</span><p>runtime shipped to the watch</p></div>
-        <div class="stat"><b data-count="466">0</b><span>px</span><p>design width, round &amp; rect</p></div>
+        <div class="stat"><b data-count="514">0</b><span>px</span><p>tall Redmi Watch 5 screen, 432 wide</p></div>
         <div class="stat"><b data-count="100">0</b><span>%</span><p>unused CSS pruned</p></div>
         <div class="stat"><b data-count="25">0</b><span>APIs</span><p><code>@system.*</code> modules typed</p></div>
       </div>
@@ -167,16 +167,18 @@
   </section>
 
   <!-- 6 -->
-  <section id="sim" class="panel" data-screen="sim" data-label="Simulator">
+  <section id="sim" class="panel" data-screen="sim" data-label="Device">
     <div class="wrap split left">
       <div class="copy">
-        <p class="eyebrow reveal">06 — Iterate fast</p>
-        <h2 class="reveal">A simulator in your browser.</h2>
-        <p class="reveal"><code>bun run sim</code> runs the official toolkit's build output with a DOM renderer and live reload. Round, rect and band profiles, real <code>fetch</code>, phone ↔ watch messages.</p>
-        <div class="devices reveal" role="group" aria-label="Device shape">
-          <button data-shape="0" aria-pressed="false">Round 466</button>
-          <button data-shape="1" aria-pressed="true">Redmi Watch 5 · 432×514</button>
-        </div>
+        <p class="eyebrow reveal">06 — Redmi Watch 5</p>
+        <h2 class="reveal">Built for the watch <span class="mark">on your wrist.</span></h2>
+        <p class="reveal">Every screen on this page is drawn at the Redmi Watch 5's real proportions. Try it before flashing: <code>bun run sim</code> runs the toolkit's build output in your browser with live reload, real <code>fetch</code> and phone ↔ watch messages.</p>
+        <dl class="specs reveal">
+          <div><dt>Display</dt><dd>2.07″ AMOLED · 432 × 514 · 324 ppi</dd></div>
+          <div><dt>Body</dt><dd>47.5 × 41.1 × 11.3 mm · aluminium</dd></div>
+          <div><dt>Controls</dt><dd>Touch + rotating crown</dd></div>
+          <div><dt>Strap</dt><dd>22 mm quick release</dd></div>
+        </dl>
         <p class="small-note reveal">Then <code>bun run dev:emulator</code> for the real Vela emulator.</p>
       </div>
       <div class="slot wide" aria-hidden="true"></div>

@@ -1,6 +1,6 @@
 {
   "name": "kovo-ux",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Compile React-style TSX into native Xiaomi Vela QuickApp .ux files — zero runtime overhead",
   "main": "scripts/babel-plugin-vela-ux.js",
   "files": [

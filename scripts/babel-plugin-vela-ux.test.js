@@ -675,7 +675,7 @@ describe('Style syntax', () => {
       };
     `;
     const { content } = transform(src);
-    assert.match(content, /<div style="color: red; margin: 10px;"\/>/);
+    assert.match(content, /<div style="color: red; margin: 10px;"><\/div>/);
   });
 });
 
@@ -906,7 +906,7 @@ describe('Edge cases', () => {
       };
     `;
     const { content } = transform(src);
-    assert.match(content, /<div\/>/);
+    assert.match(content, /<div><\/div>/);
   });
 
   test('text with only whitespace', () => {
@@ -916,7 +916,7 @@ describe('Edge cases', () => {
       };
     `;
     const { content } = transform(src);
-    assert.match(content, /<div\/>/);
+    assert.match(content, /<div><\/div>/);
   });
 
   test('multiple children on one line', () => {
@@ -1367,7 +1367,7 @@ describe('CRUEL: fragment madness', () => {
       };
     `;
     const { content } = transform(src);
-    assert.match(content, /<div\/>/);
+    assert.match(content, /<div><\/div>/);
   });
 
   test('fragment with single element', () => {

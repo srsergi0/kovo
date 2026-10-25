@@ -585,6 +585,24 @@ describe('Imported custom hooks', () => {
 // =========================================================================
 
 describe('Template output', () => {
+  test('empty HTML-named elements get a closing tag (the toolkit parser ignores <div/>)', () => {
+    const { content } = transform(`
+      export default function P() {
+        return <div className="card">
+          <div className="bar"><div className="fill" /></div>
+          <text className="t">x</text>
+          <span />
+          <image src="/a.png" />
+        </div>;
+      }
+    `);
+    const tpl = template(content);
+    assert.ok(tpl.includes('<div class="bar"><div class="fill"></div></div>'), tpl);
+    assert.ok(tpl.includes('<span></span>'), tpl);
+    assert.ok(tpl.includes('<image src="/a.png"/>'), tpl);
+    assert.doesNotMatch(tpl, /<(div|span|a|label|select|option|textarea|marquee)\b[^>]*\/>/);
+  });
+
   test('string literals in bindings keep apostrophes, quotes and "this." text', () => {
     const { content } = transform(`
       import { useState } from 'kovo-ux';
@@ -731,7 +749,7 @@ describe('Event handlers', () => {
         return <div onClick={() => { setN(n + 1); log(n); }} />;
       }
     `);
-    assert.match(template(content), /<div @click="kovoHandler0"\/>/);
+    assert.match(template(content), /<div @click="kovoHandler0"><\/div>/);
     assert.match(script(content), /kovoHandler0\(\) \{\s*this\.n = this\.n \+ 1;\s*this\.log\(this\.n\);/);
   });
 

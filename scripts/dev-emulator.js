@@ -116,10 +116,19 @@ async function main() {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     const packageName = manifest.package;
     const rpkDir = path.join(ROOT, 'dist');
+    // Install the debug package of this manifest; dist/ may also hold release
+    // builds (signed with another key) or packages of a previous name.
+    const expected = `${packageName}.debug.${manifest.versionName}.rpk`;
+    const newest = (files) => files
+      .map((f) => ({ f, t: fs.statSync(path.join(rpkDir, f)).mtimeMs }))
+      .sort((a, b) => b.t - a.t)
+      .map((x) => x.f)[0];
     const rpkCandidates = fs.existsSync(rpkDir)
       ? fs.readdirSync(rpkDir).filter((f) => f.endsWith('.rpk'))
       : [];
-    const rpkFile = rpkCandidates.sort().pop();
+    const rpkFile = rpkCandidates.includes(expected)
+      ? expected
+      : newest(rpkCandidates.filter((f) => f.startsWith(`${packageName}.debug.`)));
     const rpkPath = rpkFile ? path.join(rpkDir, rpkFile) : null;
 
     console.log('\x1b[35m%s\x1b[0m', `📱 Launching RPK package (${packageName}) on smartwatch emulator...`);

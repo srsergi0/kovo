@@ -283,6 +283,22 @@ describe('useEffect', () => {
     assert.match(script(content), /onInit\(\) \{\s*console\.log\('a'\);\s*console\.log\('b'\);/);
   });
 
+  test('a guard return in one effect does not skip the next effects', () => {
+    const { content } = transform(`
+      import { useState, useEffect } from 'kovo-ux';
+      export default function P() {
+        const [x] = useState('');
+        const [y, setY] = useState(0);
+        useEffect(() => { if (!x) return; setY(1); }, []);
+        useEffect(() => { setY(2); }, []);
+        return <text>{x}{y}</text>;
+      }
+    `);
+    const s = script(content);
+    assert.match(s, /kovoEffect0\(\) \{\s*if \(!this\.x\) return;\s*this\.y = 1;/);
+    assert.match(s, /onInit\(\) \{\s*this\.kovoEffect0\(\);\s*this\.y = 2;/);
+  });
+
   test('cleanup functions run in onDestroy', () => {
     const { content } = transform(`
       import { useEffect } from 'kovo-ux';
@@ -409,6 +425,63 @@ describe('Custom hooks', () => {
     assert.match(script(content), /flip\(\) \{\s*this\.lightOn = !this\.lightOn;/);
   });
 
+  test('calling the same hook twice keeps separate state', () => {
+    const { content } = transform(`
+      import { useState } from 'kovo-ux';
+      function useCounter(start) {
+        const [v, setV] = useState(start);
+        function inc() { setV(v + 1); }
+        return { v, inc };
+      }
+      export default function P() {
+        const { v: a, inc: incA } = useCounter(1);
+        const { v: b, inc: incB } = useCounter(5);
+        return <div><text onClick={incA}>{a}</text><text onClick={incB}>{b}</text></div>;
+      }
+    `);
+    const s = script(content);
+    assert.match(s, /a: 1,\s*b: 5/);
+    assert.match(s, /incA\(\) \{\s*this\.a = this\.a \+ 1;/);
+    assert.match(s, /incB\(\) \{\s*this\.b = this\.b \+ 1;/);
+  });
+
+  test('hook locals do not collide with component names or capture arguments', () => {
+    const { content } = transform(`
+      import { useState } from 'kovo-ux';
+      function useThing(n) {
+        const [data, setData] = useState(0);
+        const total = data + n;
+        return { total };
+      }
+      export default function P() {
+        const [data] = useState(3);
+        const { total } = useThing(data);
+        return <text>{total}{data}</text>;
+      }
+    `);
+    const s = script(content);
+    assert.match(s, /data: 3,\s*data2: 0/);
+    assert.match(s, /total\(\) \{\s*return this\.data2 \+ this\.data;/);
+  });
+
+  test('hook locals named like the caller keep the caller destructuring', () => {
+    const { content } = transform(`
+      import { useState } from 'kovo-ux';
+      function useFetchLike(url) {
+        const [data, setData] = useState(null);
+        const [loading, setLoading] = useState(true);
+        return { data, loading };
+      }
+      export default function P() {
+        const { data, loading } = useFetchLike('x');
+        return <text>{loading ? '...' : data}</text>;
+      }
+    `);
+    const s = script(content);
+    assert.match(s, /data: null,\s*loading: true/);
+    assert.doesNotMatch(s, /data2|loading2/);
+  });
+
   test('hooks that cannot be resolved warn', () => {
     const { warnings } = transform(`
       import { useThing } from './hooks';
@@ -512,6 +585,23 @@ describe('Imported custom hooks', () => {
 // =========================================================================
 
 describe('Template output', () => {
+  test('string literals in bindings keep apostrophes, quotes and "this." text', () => {
+    const { content } = transform(`
+      import { useState } from 'kovo-ux';
+      export default function P() {
+        const [ok] = useState(true);
+        return <div>
+          <input type="button" value={ok ? "Don't" : 'say "hi"'} />
+          <text>{ok ? 'see this.x' : ''}</text>
+        </div>;
+      }
+    `);
+    const tpl = template(content);
+    // No quote characters inside literals: the toolkit's {{ }} tokenizer ignores backslash escapes.
+    assert.ok(tpl.includes(`value="{{ok ? 'Don\\x27t' : 'say \\x22hi\\x22'}}"`), tpl);
+    assert.ok(tpl.includes(`{{ok ? 'see this.x' : ''}}`), tpl);
+  });
+
   test('template literals in text and attributes', () => {
     const { content } = transform(`
       export default function P() {
@@ -643,6 +733,29 @@ describe('Event handlers', () => {
     `);
     assert.match(template(content), /<div @click="kovoHandler0"\/>/);
     assert.match(script(content), /kovoHandler0\(\) \{\s*this\.n = this\.n \+ 1;\s*this\.log\(this\.n\);/);
+  });
+
+  test('module-level functions used as handlers are wrapped in a method', () => {
+    const { content } = transform(`
+      function helper() { console.log(1); }
+      export default function P() { return <text onClick={helper}>hi</text>; }
+    `);
+    assert.match(template(content), /@click="kovoHandler0"/);
+    assert.match(script(content), /kovoHandler0\(evt\) \{\s*helper\(evt\);/);
+  });
+
+  test('setters and event props passed as values inside function(){} use kovoSelf', () => {
+    const { content } = transform(`
+      import { useState } from 'kovo-ux';
+      export default function C({ onPick }) {
+        const [x, setX] = useState(0);
+        function go() { setTimeout(function () { [1, 2].forEach(setX); [3].forEach(onPick); }, 10); }
+        return <text onClick={go}>{x}</text>;
+      }
+    `, '/x/components/C/C.tsx');
+    const s = script(content);
+    assert.match(s, /forEach\(v => kovoSelf\.x = typeof v === "function" \? v\(kovoSelf\.x\) : v\)/);
+    assert.match(s, /forEach\(\(\.\.\.args\) => kovoSelf\.\$emit\(["']pick["']/);
   });
 
   test('inline handlers inside loops receive the loop variables', () => {

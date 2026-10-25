@@ -11,7 +11,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const { buildUxContent, compileScriptModule } = require('./babel-plugin-vela-ux.js');
+const parser = require('@babel/parser');
+const { buildUxContent, compileScriptModule, resolveSourceFile, sourceCandidates } = require('./babel-plugin-vela-ux.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const SRC_TSX = path.join(ROOT, 'src-tsx');
@@ -25,24 +26,48 @@ const SCRIPT_RE = /^(?!.*\.d\.ts$).*\.(ts|js)$/i;
 // Dependency resolution
 // ---------------------------------------------------------------------------
 
-function resolveImport(fromFile, spec) {
-  const base = path.resolve(path.dirname(fromFile), spec);
-  const candidates = [base, ...['.tsx', '.ts', '.jsx', '.js'].map((e) => base + e),
-    ...['index.tsx', 'index.ts', 'index.jsx', 'index.js'].map((f) => path.join(base, f))];
-  return candidates.find((c) => SOURCE_RE.test(c) && fs.existsSync(c) && fs.statSync(c).isFile()) || null;
+// file -> { mtimeMs, specs }: the watcher re-parses only files that changed.
+const importCache = new Map();
+
+/** Relative import specifiers of a file, read from its AST (cached by mtime). */
+function relativeImportSpecs(filePath) {
+  const { mtimeMs } = fs.statSync(filePath);
+  const cached = importCache.get(filePath);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.specs;
+  let specs = [];
+  try {
+    const ast = parser.parse(fs.readFileSync(filePath, 'utf8'), {
+      sourceType: 'module',
+      plugins: ['jsx', 'typescript'],
+      errorRecovery: true,
+    });
+    for (const node of ast.program.body) {
+      const src = node.source && node.source.value;
+      if (typeof src === 'string' && /^\.{1,2}\//.test(src)) specs.push(src);
+    }
+  } catch (_) {
+    specs = cached ? cached.specs : []; // keep the last known edges while a file has a syntax error
+  }
+  importCache.set(filePath, { mtimeMs, specs });
+  return specs;
 }
 
 /** Relative source files imported by `filePath` (limited to `within` when given). */
 function findImportedFiles(filePath, within = SRC_TSX) {
-  const source = fs.readFileSync(filePath, 'utf8');
   const results = [];
-  const importRe = /(?:import|export)\s+(?:[\s\S]*?\s+from\s+)?['"](\.{1,2}\/[^'"]+)['"]/g;
-  let match;
-  while ((match = importRe.exec(source)) !== null) {
-    const resolved = resolveImport(filePath, match[1]);
+  for (const spec of relativeImportSpecs(filePath)) {
+    const resolved = resolveSourceFile(spec, filePath);
     if (resolved && (!within || resolved.startsWith(within))) results.push(resolved);
   }
   return results;
+}
+
+/** Whether `filePath` imports `target`; a deleted target matches any path its imports could have meant. */
+function importsFile(filePath, target) {
+  const exists = fs.existsSync(target);
+  return relativeImportSpecs(filePath).some((spec) => (exists
+    ? resolveSourceFile(spec, filePath) === target
+    : sourceCandidates(spec, filePath).includes(target)));
 }
 
 function buildDependencyGraph(files) {
@@ -76,20 +101,13 @@ function buildDependencyGraph(files) {
  * and hooks are baked into their importers, so those must be rebuilt too.
  */
 function findAffectedFiles(changed, sources = walk(SRC_TSX, [], SOURCE_RE)) {
-  const importers = new Map();
-  for (const f of sources) {
-    for (const dep of findImportedFiles(f, null)) {
-      if (!importers.has(dep)) importers.set(dep, new Set());
-      importers.get(dep).add(f);
-    }
-  }
   const affected = new Set();
   const queue = [changed];
   while (queue.length) {
     const f = queue.shift();
     if (affected.has(f)) continue;
     affected.add(f);
-    for (const imp of importers.get(f) || []) queue.push(imp);
+    for (const imp of sources) if (imp !== f && !affected.has(imp) && importsFile(imp, f)) queue.push(imp);
   }
   return [...affected].filter((f) => (COMPILE_RE.test(f) || SCRIPT_RE.test(f)) && fs.existsSync(f));
 }

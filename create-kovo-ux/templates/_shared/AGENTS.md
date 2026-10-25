@@ -185,7 +185,7 @@ export default function Detail() {
 | `useEffect(fn, [a, obj.b, \`${x}\`])` | runs once, then re-runs via `$watch` on every state/prop/computed it reads |
 | `useEffect(() => { …; return cleanup }, …)` | cleanup runs before re-runs and in `onDestroy` |
 | `useLayoutEffect` | same as `useEffect` |
-| Custom hook `useX()` (same file or relative import) | inlined; destructuring aliases rename (`const { a: b } = useX()`) |
+| Custom hook `useX()` (same file or relative import) | inlined; destructuring aliases rename (`const { a: b } = useX()`); calling it twice keeps separate state (clashing internal names get a suffix, e.g. `data2`) |
 | Child prop `onSelect` called as `onSelect(a, b)` | `this.$emit('select', …)`; parent `onSelect={fn}` receives `(a, b)` |
 | TS prop types (`{ title: string }`) | `props: { title: { type: String } }` |
 | Module-level constants/helpers used in JSX | bridged onto the ViewModel automatically |

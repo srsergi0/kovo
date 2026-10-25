@@ -29,7 +29,7 @@ Kovo compiles React-style components onto **native Vela ViewModel features**. Th
 | `useEffect(() => { ...; return cleanup })` | cleanup runs before re-runs and in `onDestroy` |
 | child prop `onSelect` + `onSelect(a, b)` | `this.$emit('select', { kovoArgs: [a, b] })` |
 | parent `<Child onSelect={fn} />` | `@select="kovoHandlerN"` → `fn(...kovoArgs(evt))` |
-| custom hook `useX()` (same file or relative import) | inlined; params substituted, `const { a: b } = useX()` renames; the hook module's imports and helpers are copied into the page, and the hook import is dropped |
+| custom hook `useX()` (same file or relative import) | inlined; params substituted, `const { a: b } = useX()` renames; internal names that clash with the component, an earlier hook call or the call arguments get a numeric suffix (`data2`), so calling a hook twice keeps separate state; the hook module's imports and helpers are copied into the page, and the hook import is dropped |
 | TypeScript props `({ title }: { title: string })` | `props: { title: { type: String } }` |
 
 Rewriting is **scope-aware** (Babel bindings): parameters, local variables, object keys and strings that share a name with state are never touched. Inside nested `function () {}` callbacks Kovo uses a `const kovoSelf = this` alias.

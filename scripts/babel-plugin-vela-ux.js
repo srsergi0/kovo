@@ -996,8 +996,17 @@ function directiveAttrs(opts) {
 // JSX serialization
 // -----------------------------------------------------------------------------
 
+// aiot-toolkit parses templates with an HTML parser (aiot-parse5): for tags that
+// are also HTML elements, `<div/>` is an OPEN tag, so everything after it nests
+// inside and the tree breaks. These must always get an explicit closing tag.
+const NO_SELF_CLOSE = new Set(['div', 'span', 'a', 'label', 'select', 'option', 'textarea', 'marquee']);
+
+function emptyElement(tag, attrStr) {
+  return NO_SELF_CLOSE.has(tag) ? `<${tag}${attrStr}></${tag}>` : `<${tag}${attrStr}/>`;
+}
+
 function wrapChildren(tag, attrStr, innerParts) {
-  if (innerParts.length === 0) return `<${tag}${attrStr}/>`;
+  if (innerParts.length === 0) return emptyElement(tag, attrStr);
   const joined = innerParts.join('');
   if (!joined.includes('\n') || TEXT_LIKE.has(tag)) {
     return `<${tag}${attrStr}>${joined}</${tag}>`;
@@ -1633,7 +1642,7 @@ function serializeCustomComponent(node, name, ctx, opts) {
     ctx.warn(`Children passed to <${name}>: Vela documents no <slot>, so they may not render.`);
   }
   const attrStr = attrs.length ? ' ' + attrs.join(' ') : '';
-  if (innerParts.length === 0) return `<${kebabName}${attrStr}/>`;
+  if (innerParts.length === 0) return emptyElement(kebabName, attrStr);
   return `<${kebabName}${attrStr}>${innerParts.join('')}</${kebabName}>`;
 }
 

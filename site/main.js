@@ -133,7 +133,7 @@ function setupRig() {
     S('hooks', { z: 0, rx: 0.2, ry: -0.35, rz: -0.05, morph: 0, spin: Math.PI * 2 }),
     S('fetch', { z: 0, rx: 0.05, ry: 0.3, rz: 0, morph: 0, spin: Math.PI * 4 }),
     { x: 4.1, y: 1.55, z: 0, rx: 0.3, ry: -0.6, rz: 0.2, s: 0.5, morph: 0, spin: Math.PI * 4 },
-    S('sim', { z: 0, rx: 0.12, ry: -0.45, rz: 0, morph: 1, spin: Math.PI * 4 }),
+    (() => { const p = S('sim', { z: 0, rx: 0.05, ry: -0.12, rz: 0, morph: 1, spin: Math.PI * 4 }); return { ...p, y: p.y + 0.2, s: p.s * 0.7 }; })(),
     { x: 4.1, y: 1.55, z: 0, rx: 0.3, ry: -0.6, rz: -0.1, s: 0.5, morph: 0, spin: Math.PI * 6 },
   ] : [
     { x: 0, y: 1.25, z: 0, rx: 0.15, ry: -0.35, rz: 0, s: 0.62, morph: 0, spin: 0 },
@@ -275,13 +275,6 @@ document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('cli
   document.querySelectorAll('.tabs button').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
   gsap.to(faces, { rotateY: back ? 180 : 0, duration: 0.9, ease: 'power3.inOut' });
   gsap.to(fname, { opacity: 0, duration: 0.2, onComplete: () => { fname.textContent = back ? 'src/pages/weather/weather.ux' : 'pages/weather/weather.tsx'; gsap.to(fname, { opacity: 1, duration: 0.3 }); } });
-}));
-
-// ---------- simulator: morph round ↔ rect ----------
-document.querySelectorAll('.devices button').forEach((b) => b.addEventListener('click', () => {
-  document.querySelectorAll('.devices button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
-  gsap.to(rig, { morph: Number(b.dataset.shape), duration: 1, ease: 'power3.inOut' });
-  gsap.fromTo(rig, { rz: 0 }, { rz: 0, keyframes: [{ rz: 0.25, duration: 0.4 }, { rz: 0, duration: 0.6, ease: 'elastic.out(1,0.4)' }] });
 }));
 
 // ---------- misc ----------

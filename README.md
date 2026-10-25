@@ -4,6 +4,8 @@
 
 Kovo is a compile-time engine that transforms standard React functional components (`useState`, `useRef`, custom hooks) into native Xiaomi Vela QuickApp `.ux` files — with zero runtime overhead.
 
+**[▶ Live showcase](https://srsergi0.github.io/kovo/)** — TSX → `.ux` side by side, on an animated 3D watch.
+
 ---
 
 ## ⚡ Quick Start

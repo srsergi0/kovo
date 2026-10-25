@@ -44,7 +44,9 @@
     "clean": "node -e \"require('fs').rmSync('src',{recursive:true,force:true})\"",
     "sync:templates": "node scripts/sync-templates.js",
     "release": "node scripts/release.js",
-    "sim": "node simulator/server.js"
+    "sim": "node simulator/server.js",
+    "site:dev": "python -m http.server 4477 --directory site",
+    "site:deploy": "git subtree push --prefix site origin gh-pages"
   },
   "devDependencies": {
     "@aiot-toolkit/velasim": "^0.1.26",

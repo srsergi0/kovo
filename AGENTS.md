@@ -20,6 +20,7 @@ Kovo compiles React-style TSX (function components + hooks) into native Xiaomi V
 | `scripts/copy-static.js` | Copies resources and auto-generates `manifest.json` routes from `src-tsx/pages/` |
 | `scripts/dev.js`, `dev-emulator.js` | Watcher (rebuilds importers) and emulator launcher |
 | `simulator/` | Browser simulator prototype (`bun run sim`): runs the toolkit's `build/` output with a DOM implementation of `aiot.__ce__/__cf__/__ci__`, see `docs/10-browser-simulator.md` |
+| `site/` | Showcase page for GitHub Pages (three.js + GSAP, static, no build). Preview `bun run site:dev`; publish `bun run site:deploy` (subtree push to `gh-pages`) |
 | `scripts/release.js` | Signed optimized release via `aiot release` |
 | `scripts/sync-templates.js` | Copies canonical files into `create-kovo-ux/templates/_shared/` |
 | `types/kovo.d.ts` | JSX intrinsic elements, hooks, `@system.*` typings |

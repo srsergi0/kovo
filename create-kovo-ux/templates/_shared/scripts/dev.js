@@ -52,10 +52,13 @@ function handleFileChange(eventType, filename) {
     const isSource = /\.(tsx|jsx|ts|js)$/i.test(filename);
 
     if (!fs.existsSync(fullPath)) {
-      const outUx = path.join(SRC_OUT, filename.replace(/\.(t|j)sx?$/, '.ux'));
-      if (fs.existsSync(outUx)) {
-        fs.unlinkSync(outUx);
-        console.log('\x1b[33m%s\x1b[0m', `🗑️ Deleted ${filename} -> ${path.relative(process.cwd(), outUx)}`);
+      // .tsx/.jsx compile to .ux, .ts/.js helpers to .js
+      const out = path.join(SRC_OUT, /\.(t|j)sx$/i.test(filename)
+        ? filename.replace(/\.(t|j)sx$/i, '.ux')
+        : filename.replace(/\.ts$/i, '.js'));
+      if (isSource && fs.existsSync(out)) {
+        fs.unlinkSync(out);
+        console.log('\x1b[33m%s\x1b[0m', `🗑️ Deleted ${filename} -> ${path.relative(process.cwd(), out)}`);
       }
       // Importers may have inlined the deleted file: rebuild them so the error surfaces.
       if (isSource) recompile(findAffectedFiles(fullPath).filter((f) => f !== fullPath), filename);

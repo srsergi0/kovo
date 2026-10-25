@@ -147,8 +147,34 @@ function exprSource(node) {
   return generator(node).code.trim();
 }
 
-function dropThis(src) {
-  return src.replace(/\bthis\./g, '');
+/**
+ * Template-expression quoting. The toolkit splits `{{ }}` with a tokenizer that
+ * ignores backslash escapes (`\'` ends the string for it), and `"` would end the
+ * XML attribute, so quotes inside literals become `\x27` / `\x22`.
+ */
+function velaStringRaw(value) {
+  const body = value.replace(/\\/g, '\\\\').replace(/'/g, '\\x27').replace(/"/g, '\\x22')
+    .replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+  return `'${body}'`;
+}
+
+/**
+ * Source of an expression for a `{{ }}` binding: `this.x` -> `x` (bindings are
+ * evaluated against the ViewModel) and string literals re-quoted for the template.
+ */
+function velaExprSource(node) {
+  const expr = rewriteTree(t.cloneNode(node, true), (n) => {
+    if (t.isMemberExpression(n) && !n.computed && t.isThisExpression(n.object) && t.isIdentifier(n.property)) {
+      return t.identifier(n.property.name);
+    }
+    if (t.isStringLiteral(n)) {
+      const lit = t.stringLiteral(n.value);
+      lit.extra = { rawValue: n.value, raw: velaStringRaw(n.value) };
+      return lit;
+    }
+    return undefined;
+  });
+  return exprSource(expr);
 }
 
 function camelToKebab(s) {
@@ -576,7 +602,7 @@ function exprToVelaBinding(node, ctx) {
   expr = rewriteTree(expr, (n) => (t.isTemplateLiteral(n) ? templateLiteralToConcat(n) : undefined));
   if (containsFunction(expr)) expr = hoistBindingToComputed(node, expr, ctx);
   if (ctx.component) bridgeModuleBindings(expr, ctx);
-  return dropThis(exprSource(expr));
+  return velaExprSource(expr);
 }
 
 /**
@@ -623,7 +649,7 @@ function serializeInterpolatedTemplate(tl, ctx) {
     const expr = tl.expressions[i] && unwrapParens(tl.expressions[i]);
     if (!expr) return;
     if (t.isStringLiteral(expr) || t.isNumericLiteral(expr)) out += escapeXml(String(expr.value));
-    else out += `{{${exprToVelaBinding(expr, ctx).replace(/"/g, "'")}}}`;
+    else out += `{{${exprToVelaBinding(expr, ctx)}}}`;
   });
   return out;
 }
@@ -643,7 +669,7 @@ function serializeStringValue(value, ctx) {
     if (t.isNullLiteral(expr)) return '';
     if (t.isIdentifier(expr, { name: 'undefined' })) return '';
     if (t.isTemplateLiteral(expr)) return serializeInterpolatedTemplate(expr, ctx);
-    return `{{${exprToVelaBinding(expr, ctx).replace(/"/g, "'")}}}`;
+    return `{{${exprToVelaBinding(expr, ctx)}}}`;
   }
   return '';
 }
@@ -670,7 +696,7 @@ function serializeStyleObject(objExpr, ctx) {
       t.isConditionalExpression(valueNode) ||
       t.isLogicalExpression(valueNode)
     ) {
-      value = `{{${exprToVelaBinding(valueNode, ctx).replace(/"/g, "'")}}}`;
+      value = `{{${exprToVelaBinding(valueNode, ctx)}}}`;
     } else {
       throw new Error(`Unsupported style value: ${exprSource(valueNode)}`);
     }
@@ -761,7 +787,10 @@ function serializeEventHandler(name, value, ctx) {
     return `${velaAttr}="${expr.property.name}"`;
   }
   if (t.isIdentifier(expr)) {
-    if (comp && (comp.setters.has(expr.name) || comp.eventProps.has(expr.name))) {
+    // Setters, event props and module-level/imported functions are not ViewModel
+    // methods: wrap them in a generated method so @event has something to call.
+    const external = comp && !comp.memberNames.has(expr.name) && !loopVarNames(ctx).includes(expr.name);
+    if (comp && (comp.setters.has(expr.name) || comp.eventProps.has(expr.name) || external)) {
       const evt = t.identifier('evt');
       return `${velaAttr}="${hoistHandler([evt], t.callExpression(t.identifier(expr.name), [evt]), ctx)}"`;
     }
@@ -769,13 +798,13 @@ function serializeEventHandler(name, value, ctx) {
   }
   if (isFunctionNode(expr)) {
     const direct = directHandlerCall(expr, ctx);
-    if (direct) return `${velaAttr}="${direct.replace(/"/g, "'")}"`;
+    if (direct) return `${velaAttr}="${direct}"`;
     if (comp) return `${velaAttr}="${hoistHandler(expr.params, expr.body, ctx)}"`;
   }
   ctx.warn(
     `Event handler ${name} has complex expression. Vela's @event uses a method name. Falling back to: ${exprToVelaBinding(expr, ctx)}`,
   );
-  return `${velaAttr}="${exprToVelaBinding(expr, ctx).replace(/"/g, "'")}"`;
+  return `${velaAttr}="${exprToVelaBinding(expr, ctx)}"`;
 }
 
 function serializeAttribute(attr, ctx, element) {
@@ -846,9 +875,7 @@ function serializeAttribute(attr, ctx, element) {
     if (t.isTemplateLiteral(expr) && name !== 'src') {
       return `${camelToKebab(name)}="${serializeInterpolatedTemplate(expr, ctx)}"`;
     }
-    const velaVal = exprToVelaBinding(expr, ctx);
-    const safeVal = velaVal.replace(/"/g, "'");
-    return `${camelToKebab(name)}="{{${safeVal}}}"`;
+    return `${camelToKebab(name)}="{{${exprToVelaBinding(expr, ctx)}}}"`;
   }
   return null;
 }
@@ -1367,11 +1394,27 @@ function serializeMap(memberExpr, args, ctx) {
 // Custom components
 // -----------------------------------------------------------------------------
 
+// One resolution order for the compiler and the build/watch scripts, so the
+// file that gets inlined is the file whose edits trigger a rebuild.
+const SOURCE_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js'];
+
+/** Every path a relative import may point to, in resolution order. */
+function sourceCandidates(spec, fromFile) {
+  const base = path.resolve(path.dirname(fromFile), spec);
+  return [base, ...SOURCE_EXTENSIONS.map((e) => base + e), ...SOURCE_EXTENSIONS.map((e) => path.join(base, `index${e}`))]
+    .filter((c) => /\.(t|j)sx?$/.test(c));
+}
+
+/** Resolves a relative import to an existing .tsx/.ts/.jsx/.js file, or null. */
+function resolveSourceFile(spec, fromFile) {
+  if (!fromFile || !path.isAbsolute(fromFile) || !/^\.{1,2}\//.test(spec)) return null;
+  return sourceCandidates(spec, fromFile).find((c) => fs.existsSync(c) && fs.statSync(c).isFile()) || null;
+}
+
 function resolveComponentFile(src, ctx) {
-  if (!ctx.filename || !path.isAbsolute(ctx.filename) || /\.ux$/.test(src)) return null;
-  const base = path.resolve(path.dirname(ctx.filename), src);
-  const candidates = [base, `${base}.tsx`, `${base}.jsx`, path.join(base, 'index.tsx')];
-  return candidates.find((c) => /\.(t|j)sx$/.test(c) && fs.existsSync(c)) || null;
+  if (/\.ux$/.test(src)) return null;
+  const file = resolveSourceFile(src, ctx.filename);
+  return file && /\.(t|j)sx$/.test(file) ? file : null;
 }
 
 /**
@@ -1577,9 +1620,7 @@ function serializeCustomComponent(node, name, ctx, opts) {
       continue;
     }
     if (t.isJSXExpressionContainer(attr.value)) {
-      const velaVal = exprToVelaBinding(attr.value.expression, ctx);
-      const safeVal = velaVal.replace(/"/g, "'");
-      attrs.push(`${camelToKebab(attrName)}="{{${safeVal}}}"`);
+      attrs.push(`${camelToKebab(attrName)}="{{${exprToVelaBinding(attr.value.expression, ctx)}}}"`);
       continue;
     }
     ctx.warn(`Custom component attr ${attrName} dropped (unsupported value type).`);
@@ -1617,6 +1658,8 @@ function createComponentModel(kind) {
     bridgedMethods: new Set(),
     bridgedValues: new Set(),
     memberNames: new Set(),
+    reservedNames: new Set(),
+    usedNames: new Set(),
     templateNode: null,
     styleCss: '',
     handlerCount: 0,
@@ -1638,11 +1681,7 @@ function findHookInAst(ast, name) {
 }
 
 function resolveModuleFile(src, fromFile) {
-  if (!fromFile || !path.isAbsolute(fromFile)) return null;
-  const base = path.resolve(path.dirname(fromFile), src);
-  const candidates = [base, ...['.ts', '.tsx', '.js', '.jsx'].map((e) => base + e),
-    ...['index.ts', 'index.tsx', 'index.js'].map((f) => path.join(base, f))];
-  return candidates.find((c) => /\.(t|j)sx?$/.test(c) && fs.existsSync(c) && fs.statSync(c).isFile()) || null;
+  return resolveSourceFile(src, fromFile);
 }
 
 function loadModule(file, ctx, root) {
@@ -1851,6 +1890,9 @@ function inlineHook(name, call, pattern, model, ctx, mod, depth) {
   }
 
   const args = (call && call.arguments) || [];
+  const renames = hookReturnRenames(name, fnPath, pattern, ctx);
+  makeHookHygienic(fnPath, args, renames, model);
+
   fnPath.node.params.forEach((param, i) => {
     let pname = null;
     let def = null;
@@ -1871,8 +1913,23 @@ function inlineHook(name, call, pattern, model, ctx, mod, depth) {
     for (const ref of binding ? binding.referencePaths : []) ref.replaceWith(t.cloneNode(value, true));
   });
 
+  // Rename through a temporary name so swaps (a<->b) do not collide.
+  renames.forEach(([from], i) => fnPath.scope.rename(from, `kovoTmp${i}`));
+  renames.forEach(([, to], i) => fnPath.scope.rename(`kovoTmp${i}`, to));
+
+  for (const stmt of fnPath.node.body.body || []) {
+    if (t.isReturnStatement(stmt)) continue;
+    processComponentStatement(stmt, model, ctx, hookMod, depth + 1, false);
+  }
+}
+
+/** [[hookName, callerName]] pairs for the values the caller destructures. */
+function hookReturnRenames(name, fnPath, pattern, ctx) {
   let body = fnPath.node.body;
-  if (!t.isBlockStatement(body)) body = t.blockStatement([t.returnStatement(body)]);
+  if (!t.isBlockStatement(body)) {
+    body = t.blockStatement([t.returnStatement(body)]);
+    fnPath.node.body = body;
+  }
   const ret = body.body.find((s) => t.isReturnStatement(s));
   const retArg = ret && unwrapParens(ret.argument);
 
@@ -1886,25 +1943,72 @@ function inlineHook(name, call, pattern, model, ctx, mod, depth) {
         ctx.warn(`Hook ${name}() does not return "${key}".`);
         continue;
       }
-      if (t.isIdentifier(ret.value) && ret.value.name !== prop.value.name) renames.push([ret.value.name, prop.value.name]);
+      if (t.isIdentifier(ret.value)) renames.push([ret.value.name, prop.value.name]);
       else if (!t.isIdentifier(ret.value)) ctx.warn(`Hook ${name}(): returned "${key}" must be a plain identifier.`);
     }
   } else if (t.isArrayPattern(pattern) && t.isArrayExpression(retArg)) {
     pattern.elements.forEach((el, i) => {
       const ret = retArg.elements[i];
-      if (t.isIdentifier(el) && t.isIdentifier(ret) && ret.name !== el.name) renames.push([ret.name, el.name]);
+      if (t.isIdentifier(el) && t.isIdentifier(ret)) renames.push([ret.name, el.name]);
     });
   } else if (pattern && !t.isObjectPattern(pattern) && !t.isArrayPattern(pattern)) {
     ctx.warn(`Hook ${name}(): destructure its result (const { a } = ${name}()) so Kovo can inline it.`);
   }
-  // Rename through a temporary name so swaps (a<->b) do not collide.
-  renames.forEach(([from], i) => fnPath.scope.rename(from, `kovoTmp${i}`));
-  renames.forEach(([, to], i) => fnPath.scope.rename(`kovoTmp${i}`, to));
+  return renames;
+}
 
-  for (const stmt of fnPath.node.body.body || []) {
-    if (t.isReturnStatement(stmt)) continue;
-    processComponentStatement(stmt, model, ctx, hookMod, depth + 1, false);
+/**
+ * Hooks share one ViewModel with their caller, so the hook's own names must
+ * not collide with the component's names, with names from earlier hook calls
+ * (two useCounter() calls get separate state) or with names read by the call
+ * arguments (substituted arguments must not be captured by hook locals).
+ */
+function makeHookHygienic(fnPath, args, renames, model) {
+  const exported = new Set(renames.map(([from]) => from));
+  const targets = new Set(renames.map(([, to]) => to));
+  const argNames = new Set();
+  for (const a of args) for (const n of referencedNames(a)) argNames.add(n);
+  const taken = new Set([...model.reservedNames, ...model.usedNames, ...argNames]);
+  for (const n of targets) taken.delete(n);
+
+  const fresh = (scope, base) => {
+    let i = 2;
+    while (taken.has(`${base}${i}`) || scope.hasBinding(`${base}${i}`)) i++;
+    return `${base}${i}`;
+  };
+  const params = new Set(fnPath.node.params.map((p) => (t.isAssignmentPattern(p) ? p.left : p)).filter((p) => t.isIdentifier(p)).map((p) => p.name));
+
+  // Returned names are renamed to the caller's names later; move them out of
+  // the way first when an argument reads the same name.
+  for (const pair of renames) {
+    if (!argNames.has(pair[0])) continue;
+    const to = fresh(fnPath.scope, pair[0]);
+    fnPath.scope.rename(pair[0], to);
+    pair[0] = to;
   }
+
+  // Top-level hook bindings become ViewModel members.
+  for (const bname of Object.keys(fnPath.scope.bindings)) {
+    if (params.has(bname) || exported.has(bname)) continue;
+    if (taken.has(bname)) {
+      const to = fresh(fnPath.scope, bname);
+      fnPath.scope.rename(bname, to);
+      model.usedNames.add(to);
+    } else {
+      model.usedNames.add(bname);
+    }
+  }
+  for (const n of targets) model.usedNames.add(n);
+  // Nested locals only need to avoid capturing the substituted arguments.
+  if (!argNames.size) return;
+  fnPath.traverse({
+    Scopable(p) {
+      if (p.scope === fnPath.scope) return;
+      for (const bname of Object.keys(p.scope.bindings)) {
+        if (argNames.has(bname)) p.scope.rename(bname, fresh(p.scope, bname));
+      }
+    },
+  });
 }
 
 function processComponentStatement(stmt, model, ctx, mod, depth, isRoot) {
@@ -2073,6 +2177,8 @@ function analyzeFunctionComponent(fnPath, ast, ctx, propTypes) {
   const stmts = t.isBlockStatement(body) ? body.body : [t.returnStatement(body)];
   const mod = { ast, file: ctx.filename };
   mod.root = mod;
+  // Names declared by the component itself; inlined hooks must not reuse them.
+  model.reservedNames = new Set([...Object.keys(fnPath.scope.bindings), ...model.props.keys(), ...model.eventProps.keys()]);
   for (const stmt of stmts) processComponentStatement(stmt, model, ctx, mod, 0, true);
 
   classifyDerived(model, ctx);
@@ -2192,7 +2298,7 @@ function rewriteFunction(fnNode, model, ctx) {
         // Setter used as a value: a function that behaves like React's setter.
         const stateName = model.setters.get(name);
         const v = t.identifier('v');
-        const target = t.memberExpression(t.thisExpression(), t.identifier(stateName));
+        const target = member(p, stateName);
         p.replaceWith(t.arrowFunctionExpression([v], t.assignmentExpression('=', target,
           t.conditionalExpression(
             t.binaryExpression('===', t.unaryExpression('typeof', v), t.stringLiteral('function')),
@@ -2214,7 +2320,7 @@ function rewriteFunction(fnNode, model, ctx) {
         }
         const a = t.identifier('args');
         p.replaceWith(t.arrowFunctionExpression([t.restElement(a)], t.callExpression(
-          t.memberExpression(t.thisExpression(), t.identifier('$emit')),
+          member(p, '$emit'),
           [t.stringLiteral(model.eventProps.get(name)),
             t.objectExpression([t.objectProperty(t.identifier('kovoArgs'), a)])],
         )));
@@ -2288,11 +2394,12 @@ function depPaths(deps, model, ctx) {
   return [...new Set(paths)];
 }
 
-function hasTopLevelReturn(block) {
+/** `return x` outside nested functions; with `bare`, also a plain `return;`. */
+function hasTopLevelReturn(block, bare = false) {
   let found = false;
   (function walk(n) {
     if (!n || typeof n.type !== 'string' || found) return;
-    if (t.isReturnStatement(n) && n.argument) {
+    if (t.isReturnStatement(n) && (n.argument || bare)) {
       found = true;
       return;
     }
@@ -2424,7 +2531,8 @@ function buildFunctionScript(model, ctx) {
     const usesDom = [...model.refs].some(([name, ref]) => ref.dom && used.has(name));
     const hook = usesDom ? 'onReady' : 'onInit';
 
-    if (!hasCleanup && paths.length === 0) {
+    // A guard `return;` must stay inside its own method, or it would leave onInit.
+    if (!hasCleanup && paths.length === 0 && !hasTopLevelReturn(block, true)) {
       const scoped = block.body.some((st) => t.isVariableDeclaration(st) && st.kind !== 'var' ||
         t.isFunctionDeclaration(st) || t.isClassDeclaration(st));
       const cloned = t.cloneNode(block, true);
@@ -2927,3 +3035,5 @@ function compileScriptModule(source, filename) {
 
 module.exports.buildUxContent = buildUxContent;
 module.exports.compileScriptModule = compileScriptModule;
+module.exports.resolveSourceFile = resolveSourceFile;
+module.exports.sourceCandidates = sourceCandidates;
